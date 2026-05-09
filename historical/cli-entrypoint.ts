@@ -1,0 +1,17 @@
+export { agentTest, defineAgentTest, describe } from "./runtime/spec.js";
+export { runBlopTest, runBlopTests } from "./runtime/runner.js";
+export type {
+  BlopAction,
+  BlopAgent,
+  BlopAgentEvent,
+  BlopAgentStep,
+  BlopAgentTest,
+  BlopAgentTestContext,
+  BlopAgentTestHandler,
+  BlopCiMetadata,
+  BlopReporter,
+  BlopRunOptions,
+  BlopRunResult,
+  BlopTestResult,
+  BlopTestStatus,
+} from "./runtime/types.js";
