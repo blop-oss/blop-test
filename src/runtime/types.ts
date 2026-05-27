@@ -92,6 +92,34 @@ export type BlopAction = {
   timestamp: string;
 };
 
+export type BlopScreenshot = {
+  path: string;
+  name: string;
+  checkpoint?: string;
+  reason?: string;
+  target?: string;
+  focused: boolean;
+  fullPage: boolean;
+  timestamp: string;
+};
+
+export type BlopCriticalPoint = {
+  id: string;
+  description: string;
+  status: "pending" | "passed" | "failed";
+  evidence?: string;
+  screenshot?: string;
+  timestamp: string;
+};
+
+export type BlopBrowserLog = {
+  type: "console" | "pageerror" | "requestfailed";
+  level?: string;
+  message: string;
+  url?: string;
+  timestamp: string;
+};
+
 export type BlopTestResult = {
   id: string;
   name: string;
@@ -106,6 +134,9 @@ export type BlopTestResult = {
   model: string | null;
   ci: BlopCiMetadata;
   screenshots: string[];
+  screenshotArtifacts: BlopScreenshot[];
+  criticalPoints: BlopCriticalPoint[];
+  browserLogs: BlopBrowserLog[];
   actions: BlopAction[];
   events: BlopAgentEvent[];
 };

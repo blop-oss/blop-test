@@ -1,13 +1,15 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { runAgentStream } from "@unravelai/khadim";
-import { chromium, firefox, webkit } from "playwright";
+import { chromium, firefox, webkit, type Page } from "playwright";
 import { createBrowserTools, type FinishState } from "../browser/tools.js";
 import { getCiMetadata } from "../node/ci.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
 import { loadAgentTests } from "./spec.js";
-import type { BlopAgentEvent, BlopRunOptions, BlopRunResult, BlopTestResult, BlopTestStatus } from "./types.js";
+import type { BlopAgentEvent, BlopBrowserLog, BlopCriticalPoint, BlopRunOptions, BlopRunResult, BlopScreenshot, BlopTestResult, BlopTestStatus } from "./types.js";
+
+const DEFAULT_MAX_STEPS = 100;
 
 export async function runBlopTest(options: BlopRunOptions): Promise<BlopRunResult> {
   if (!options.specFile) {
@@ -57,6 +59,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             model: options.model ?? process.env.BLOP_AGENT_MODEL ?? null,
             ci: getCiMetadata(),
             screenshots: [],
+            screenshotArtifacts: [],
+            criticalPoints: [],
+            browserLogs: [],
             actions: [],
             events: [],
           });
@@ -84,6 +89,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
               model: options.model ?? process.env.BLOP_AGENT_MODEL ?? null,
               ci: getCiMetadata(),
               screenshots: [],
+              screenshotArtifacts: [],
+              criticalPoints: [],
+              browserLogs: [],
               actions: [],
               events: [],
             });
@@ -92,6 +100,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 
           const actions: BlopTestResult["actions"] = [];
           const screenshots: string[] = [];
+          const screenshotArtifacts: BlopScreenshot[] = [];
+          const criticalPoints: BlopCriticalPoint[] = [];
+          const browserLogs: BlopBrowserLog[] = [];
           const events: BlopAgentEvent[] = [];
           const testStartedAt = new Date();
           let status: BlopTestStatus = "error";
@@ -114,6 +125,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             }
 
             const page = await context.newPage();
+            attachBrowserLogListeners(page, browserLogs, attempt);
             const finishState: FinishState = { status: null, reason: null };
             const controller = new AbortController();
             const timeoutMs = test.timeoutMs ?? options.timeoutMs;
@@ -128,6 +140,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
                 screenshotDir: screenshotsDir,
                 actions,
                 screenshots,
+                screenshotArtifacts,
+                criticalPoints,
                 finishState,
                 baseUrl: test.baseUrl ?? options.baseUrl,
               });
@@ -136,10 +150,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
                 name: test.name,
                 goal: test.goal,
                 baseUrl: test.baseUrl ?? options.baseUrl,
-                maxSteps: options.maxSteps ?? 25,
+                maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
               });
 
               let stepCount = 0;
+              let lastAgentError: string | null = null;
               const agentStream = options.agentStream ?? runAgentStream;
               for await (const event of agentStream({
                 prompt,
@@ -166,6 +181,10 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
                 } satisfies BlopAgentEvent;
                 events.push(captured);
 
+                if (event.event_type === "error" && event.content) {
+                  lastAgentError = event.content;
+                }
+
                 if (event.event_type === "step_start") {
                   stepCount += 1;
                   if (options.verbose) {
@@ -179,13 +198,13 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
                   if (output) console.error(output);
                 }
 
-                if (stepCount > (options.maxSteps ?? 25)) {
+                if (stepCount > (options.maxSteps ?? DEFAULT_MAX_STEPS)) {
                   const resolvedProvider = options.provider ?? process.env.BLOP_AGENT_PROVIDER;
                   const hasApiKey = !!(options.apiKey ?? process.env.BLOP_AGENT_API_KEY);
                   const hint = !hasApiKey
                     ? `\n\nNo API key is configured. Set one via:\n  BLOP_AGENT_API_KEY=sk-...\n  ${providerEnvHint(resolvedProvider)}\n  --api-key sk-...\n  blop.config.ts: apiKey: 'sk-...'`
                     : "\n\nTry increasing --max-steps or check that the agent provider and model are correctly configured.";
-                  throw new Error(`Agent exceeded max step count of ${options.maxSteps ?? 25}${hint}`);
+                  throw new Error(`Agent exceeded max step count of ${options.maxSteps ?? DEFAULT_MAX_STEPS}${hint}`);
                 }
               }
 
@@ -211,13 +230,18 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 
               if (hasLiveAgent && events.length > 0 && actions.length === 0 && finishState.status === null) {
                 const resolvedProvider = options.provider ?? process.env.BLOP_AGENT_PROVIDER;
+                const resolvedModel = options.model ?? process.env.BLOP_AGENT_MODEL;
                 const hasApiKey = !!(options.apiKey ?? process.env.BLOP_AGENT_API_KEY);
                 status = "error";
-                reason = `The agent produced ${events.length} event(s) but made no tool calls — the agent could not interact with the browser.\n\n`;
-                if (!hasApiKey) {
-                  reason += `No API key is configured. Set one via:\n  BLOP_AGENT_API_KEY=sk-...\n  ${providerEnvHint(resolvedProvider)}\n  --api-key sk-...\n  blop.config.ts: apiKey: 'sk-...'\n\n`;
+                if (lastAgentError) {
+                  reason = `The agent provider failed before making any browser tool calls.\n\nProvider: ${resolvedProvider ?? "default"}\nModel: ${resolvedModel ?? "default"}\nLast agent error: ${lastAgentError}\n\nCheck that the provider supports this model and that the API key is valid.`;
+                } else {
+                  reason = `The agent produced ${events.length} event(s) but made no tool calls — the agent could not interact with the browser.\n\n`;
+                  if (!hasApiKey) {
+                    reason += `No API key is configured. Set one via:\n  BLOP_AGENT_API_KEY=sk-...\n  ${providerEnvHint(resolvedProvider)}\n  --api-key sk-...\n  blop.config.ts: apiKey: 'sk-...'\n\n`;
+                  }
+                  reason += "Check that the provider and model are correctly configured and the API key is valid.";
                 }
-                reason += "Check that the provider and model are correctly configured and the API key is valid.";
                 break;
               }
 
@@ -256,6 +280,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             model: options.model ?? process.env.BLOP_AGENT_MODEL ?? null,
             ci: getCiMetadata(),
             screenshots,
+            screenshotArtifacts,
+            criticalPoints,
+            browserLogs,
             actions,
             events,
           });
@@ -287,6 +314,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       model: options.model ?? process.env.BLOP_AGENT_MODEL ?? null,
       ci: getCiMetadata(),
       screenshots: [],
+      screenshotArtifacts: [],
+      criticalPoints: [],
+      browserLogs: [],
       actions: [],
       events: [],
     });
@@ -322,6 +352,36 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   return result;
 }
 
+function attachBrowserLogListeners(page: Page, browserLogs: BlopBrowserLog[], attempt: number) {
+  page.on("console", (message) => {
+    browserLogs.push({
+      type: "console",
+      level: message.type(),
+      message: message.text(),
+      timestamp: new Date().toISOString(),
+      url: page.url(),
+    });
+  });
+  page.on("pageerror", (error) => {
+    browserLogs.push({
+      type: "pageerror",
+      message: error instanceof Error ? error.message : String(error),
+      timestamp: new Date().toISOString(),
+      url: page.url(),
+      level: `attempt:${attempt}`,
+    });
+  });
+  page.on("requestfailed", (request) => {
+    browserLogs.push({
+      type: "requestfailed",
+      message: request.failure()?.errorText ?? "Request failed",
+      timestamp: new Date().toISOString(),
+      url: request.url(),
+      level: `attempt:${attempt}`,
+    });
+  });
+}
+
 function providerEnvHint(provider: string | undefined): string {
   const envVar = provider
     ? ({ openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_API_KEY", google: "GEMINI_API_KEY", groq: "GROQ_API_KEY", xai: "XAI_API_KEY", openrouter: "OPENROUTER_API_KEY", mistral: "MISTRAL_API_KEY", cerebras: "CEREBRAS_API_KEY", nvidia: "NVIDIA_API_KEY" } as Record<string, string>)[provider]
@@ -334,7 +394,7 @@ function buildPrompt(input: { name: string; goal: string; baseUrl?: string; maxS
     ? `The app base URL is ${input.baseUrl}. Resolve relative URLs in the goal against this base URL.`
     : "If the goal requires a URL, use browser_goto with the URL supplied by the test.";
 
-  return `You are running an agentic browser E2E test.\n\nTest name: ${input.name}\n\nGoal:\n${input.goal}\n\nRules:\n- ${startInstruction}\n- Use browser_snapshot before deciding important actions.\n- Prefer deterministic assertions with browser_expect_text.\n- Capture a screenshot for important success or failure evidence.\n- Do not modify files or run shell commands.\n- Stay within ${input.maxSteps} tool steps.\n- You must finish by calling finish_test with status and reason.\n`;
+  return `You are running an agentic browser E2E test.\n\nTest name: ${input.name}\n\nGoal:\n${input.goal}\n\nRules:\n- ${startInstruction}\n- Start by decomposing the goal into critical points: every explicit page, action, assertion, filter, sort, selection, value, or final datum that must be proven.\n- Use browser_snapshot before important actions; it includes visible text plus ARIA roles/labels. Prefer role, label, placeholder, test id, or text targets over brittle CSS.\n- Use record_critical_point for each requirement. Mark a point passed only when a deterministic assertion, URL, visible text, screenshot, or action output proves it.\n- Prefer deterministic assertions such as browser_expect_text, browser_expect_url, browser_expect_value, browser_expect_checked, and browser_expect_visible before passing.\n- Capture screenshots only when they add useful evidence. When one element or region proves the point, pass target to browser_screenshot so the screenshot captures the smallest relevant area; avoid fullPage unless the whole layout is the evidence.\n- Do not guess UI state. If selected state is hidden after a drawer, accordion, modal, or dropdown closes, reopen it or capture a visible chip/summary before treating it as verified.\n- If a site exposes a dedicated control for a requirement, use that control. A broad search query does not satisfy explicit filters, sorts, styles, attributes, or rankings.\n- Ranking words such as cheapest, latest, highest-rated, best-selling, or most reviewed must be grounded in the app's actual sort/filter or visible metric.\n- Numeric, date, quantity, and unit constraints must be exact. Wider buckets or broadened defaults are failures unless no exact control exists.\n- Empty results are acceptable only after the correct filters/actions were applied and evidenced.\n- For blocker claims, capture current evidence and only fail after repeated evidence from the actual UI.\n- Only use the provided browser tools; do not change files or invoke external processes.\n- Stay within ${input.maxSteps} tool steps.\n- You must finish by calling finish_test with status and reason. Use passed only after all critical points are passed or otherwise proven by deterministic assertions.\n`;
 }
 
 function summarizeStatus(results: BlopTestResult[]): BlopTestStatus {
