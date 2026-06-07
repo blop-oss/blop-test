@@ -1,4 +1,4 @@
-import { agentTest, describe } from "blop";
+import { agentTest, describe } from "@blop/cli";
 
 describe("homepage", () => {
   agentTest("loads", async ({ agent }) => {
