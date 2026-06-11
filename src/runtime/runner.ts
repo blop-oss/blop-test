@@ -1,9 +1,11 @@
+import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { runAgentStream } from "@unravelai/khadim";
 import { chromium, firefox, webkit, type Page } from "playwright";
 import { createBrowserTools, type FinishState } from "../browser/tools.js";
 import { getCiMetadata } from "../node/ci.js";
+import { startPlaywrightContainer, type PlaywrightContainerSession } from "../node/playwright-container.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
 import { loadAgentTests } from "./spec.js";
@@ -33,10 +35,37 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   const hasLiveAgent = !options.agentStream;
   let runError: string | null = null;
 
+  // Live progress sink. When a host (e.g. the web app) passes progressFile, we
+  // append one NDJSON line per lifecycle event so it can tail agent activity
+  // while the run is still in flight instead of waiting for the final report.
+  const progressPath = options.progressFile ? resolve(options.progressFile) : null;
+  if (progressPath) {
+    try {
+      writeFileSync(progressPath, "");
+    } catch {
+      // Non-fatal: progress streaming is best-effort.
+    }
+  }
+  const appendProgress = (entry: Record<string, unknown>) => {
+    if (!progressPath) return;
+    try {
+      appendFileSync(progressPath, `${JSON.stringify(entry)}\n`);
+    } catch {
+      // Ignore progress write failures; they must never break a run.
+    }
+  };
+
   let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+  let containerSession: PlaywrightContainerSession | null = null;
   try {
-    const browserType = { chromium, firefox, webkit }[options.browser ?? "chromium"];
-    browser = await browserType.launch({ headless: !options.headed });
+    if (options.containerized) {
+      const containerOptions = typeof options.containerized === "object" ? options.containerized : {};
+      containerSession = await startPlaywrightContainer(containerOptions);
+      browser = containerSession.browser as any;
+    } else {
+      const browserType = { chromium, firefox, webkit }[options.browser ?? "chromium"];
+      browser = await browserType.launch({ headless: !options.headed });
+    }
 
     try {
       for (const specFile of specFiles) {
@@ -109,11 +138,19 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
           let reason = "The agent did not finish the test.";
           let attempts = 0;
 
+          appendProgress({
+            type: "test_start",
+            test: test.name,
+            goal: test.goal,
+            baseUrl: test.baseUrl ?? options.baseUrl ?? null,
+            timestamp: new Date().toISOString(),
+          });
+
           for (let attempt = 1; attempt <= (options.retries ?? 0) + 1; attempt += 1) {
             attempts = attempt;
             let context;
             try {
-              context = await browser.newContext({
+              context = await browser!.newContext({
                 ...options.browserContext,
                 viewport: options.viewport ?? options.browserContext?.viewport,
               });
@@ -144,6 +181,19 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
                 criticalPoints,
                 finishState,
                 baseUrl: test.baseUrl ?? options.baseUrl,
+                captureStepScreenshots: options.captureStepScreenshots,
+                onAction: (action) =>
+                  appendProgress({
+                    type: "action",
+                    test: test.name,
+                    name: action.name,
+                    input: action.input,
+                    output: action.output,
+                    error:
+                      typeof action.metadata?.error === "string" ? action.metadata.error : null,
+                    screenshotPath: screenshotPathFor(action),
+                    timestamp: action.timestamp,
+                  }),
               });
 
               const prompt = buildPrompt({
@@ -266,6 +316,13 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
           }
 
           const testFinishedAt = new Date();
+          appendProgress({
+            type: "test_finish",
+            test: test.name,
+            status,
+            reason,
+            timestamp: testFinishedAt.toISOString(),
+          });
           results.push({
             id: testId,
             name: test.name,
@@ -290,7 +347,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       }
     } finally {
       try {
-        await browser?.close();
+        if (containerSession) {
+          await containerSession.stop();
+        } else {
+          await browser?.close();
+        }
       } catch {
         // Browser may already be closed or crashed.
       }
@@ -350,6 +411,17 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   }
 
   return result;
+}
+
+/** Resolve the screenshot file an action produced, if any, for progress streaming. */
+function screenshotPathFor(action: { name: string; metadata?: Record<string, unknown> }): string | null {
+  const stepShot = action.metadata?.stepScreenshotPath;
+  if (typeof stepShot === "string") return stepShot;
+  // Explicit browser_screenshot calls record their file under metadata.path.
+  if (action.name === "browser_screenshot" && typeof action.metadata?.path === "string") {
+    return action.metadata.path;
+  }
+  return null;
 }
 
 function attachBrowserLogListeners(page: Page, browserLogs: BlopBrowserLog[], attempt: number) {

@@ -52,8 +52,18 @@ export type BlopRunOptions = {
   specFiles?: string[];
   baseUrl?: string;
   reportDir?: string;
+  /**
+   * Append-only NDJSON file the runner writes live progress to (one JSON object
+   * per line: test_start, action, test_finish). Lets a host process tail agent
+   * activity while the run is still in flight instead of waiting for the final
+   * report. Ignored when unset.
+   */
+  progressFile?: string;
+  /** Capture a compact JPEG after each browser action for a visual step trail. */
+  captureStepScreenshots?: boolean;
   headed?: boolean;
   browser?: BlopBrowserName;
+  containerized?: boolean | { image?: string };
   viewport?: { width: number; height: number };
   provider?: string;
   model?: string;
