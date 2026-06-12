@@ -61,14 +61,29 @@ export type BlopRunOptions = {
   progressFile?: string;
   /** Capture a compact JPEG after each browser action for a visual step trail. */
   captureStepScreenshots?: boolean;
+  /**
+   * Stream the page live via a CDP screencast (chromium only) instead of taking
+   * a blocking screenshot per action. Keeps a fresh "latest view" for the host
+   * and serves per-action step screenshots from in-memory frames. When a
+   * progressFile is set, the runner also appends throttled `frame` progress
+   * lines pointing at the latest live frame on disk. Defaults to on.
+   */
+  streamFrames?: boolean;
+  /** Minimum ms between streamed `frame` progress lines. Defaults to 200ms. */
+  frameIntervalMs?: number;
   headed?: boolean;
   browser?: BlopBrowserName;
-  containerized?: boolean | { image?: string };
+  containerized?: boolean | { image?: string; containerName?: string };
   viewport?: { width: number; height: number };
   provider?: string;
   model?: string;
   apiKey?: string;
   cwd?: string;
+  /**
+   * Optional hard cap on agent tool steps. Unset by default: the agent runs
+   * until it calls finish_test, the test times out, or the runner's stall
+   * guard detects it looping without progress.
+   */
   maxSteps?: number;
   timeoutMs?: number;
   retries?: number;

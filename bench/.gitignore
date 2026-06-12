@@ -1,0 +1,4 @@
+# Generated measuring-stick artifacts
+report-*/
+progress-*.ndjson
+stdout-*.log
