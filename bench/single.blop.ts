@@ -1,4 +1,4 @@
-import { defineAgentTest } from "@blop/cli";
+import { defineAgentTest } from "@blopai/cli";
 
 // Deterministic single-goal benchmark used as the latency "measuring stick".
 export default defineAgentTest({

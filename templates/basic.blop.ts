@@ -1,4 +1,4 @@
-import { agentTest, describe } from "@blop/cli";
+import { agentTest, describe } from "@blopai/cli";
 
 describe("homepage", () => {
   agentTest("loads and exposes a primary action", async ({ agent }) => {
