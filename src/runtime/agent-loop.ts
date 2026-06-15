@@ -93,8 +93,21 @@ export interface AgentLoopOptions {
   cwd?: string;
   nativeTools: unknown[];
   signal?: AbortSignal;
+  /**
+   * Full system prompt to use verbatim. When set (e.g. the chat agent's prompt
+   * or a subagent archetype prompt), it replaces the built-in browser preamble
+   * — the loop is then a generic tool-calling agent, not browser-specific. When
+   * absent, the loop falls back to the minimal browser system prompt.
+   */
+  systemPrompt?: string;
   /** blop: tools that end the run when they execute successfully. */
   terminalTools?: string[];
+  /**
+   * Hard cap on tool-call turns. Defaults to {@link MAX_TURNS} (200) for a
+   * primary turn; subagents pass a small value (e.g. 12-16) so a delegated task
+   * cannot run away. On reaching the cap the loop emits an error + done.
+   */
+  maxTurns?: number;
   /** Injectable for tests; defaults to global fetch. */
   fetchFn?: typeof fetch;
   /** Injectable for tests; defaults to a real timer sleep. */
@@ -704,14 +717,16 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
   const fetchFn = opts.fetchFn ?? fetch;
   const sleepFn = opts.sleepFn ?? defaultSleep;
   const terminalTools = opts.terminalTools ?? DEFAULT_TERMINAL_TOOLS;
+  const maxTurns = opts.maxTurns && opts.maxTurns > 0 ? opts.maxTurns : MAX_TURNS;
   const tools = (opts.nativeTools as NativeToolBridge[]) ?? [];
   const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
 
   const baseUrl = resolveBaseUrl(provider);
   const headers = buildHeaders(provider, apiKey);
 
+  const systemPrompt = opts.systemPrompt?.trim() || buildSystemPrompt(tools);
   const messages: ChatMessage[] = [
-    { role: "system", content: buildSystemPrompt(tools) },
+    { role: "system", content: systemPrompt },
     { role: "user", content: opts.prompt },
   ];
 
@@ -721,8 +736,8 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
   while (true) {
     if (opts.signal?.aborted) return;
 
-    if (turnIndex >= MAX_TURNS) {
-      yield makeEvent("error", `Reached maximum turn limit (${MAX_TURNS}). Stopping.`);
+    if (turnIndex >= maxTurns) {
+      yield makeEvent("error", `Reached maximum turn limit (${maxTurns}). Stopping.`);
       yield makeEvent("done");
       return;
     }
@@ -835,3 +850,18 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
     return;
   }
 };
+
+/**
+ * Generic in-process agent loop — the same implementation as
+ * runBrowserAgentStream, exposed under a neutral name and typed to accept the
+ * full {@link AgentLoopOptions} so non-browser callers (the in-app chat agent
+ * and its subagents) can drive an agent turn directly, with no native binary
+ * and no `--prompt` argv ceiling. Pass `terminalTools: []` for a conversational
+ * agent (a text reply ends the turn) and a `systemPrompt` to replace the
+ * browser preamble.
+ */
+export function runNativeAgentStream(
+  options: AgentLoopOptions,
+): AsyncGenerator<BlopAgentStreamEvent> {
+  return runBrowserAgentStream(options) as AsyncGenerator<BlopAgentStreamEvent>;
+}
