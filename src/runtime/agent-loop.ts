@@ -51,6 +51,9 @@ const PROVIDER_BASE_URLS: Record<string, string> = {
   mistral: "https://api.mistral.ai/v1",
   cerebras: "https://api.cerebras.ai/v1",
   nvidia: "https://integrate.api.nvidia.com/v1",
+  // Ollama Cloud serves an OpenAI-compatible API; a local server uses
+  // http://localhost:11434/v1 (set BLOP_AGENT_BASE_URL to override).
+  ollama: "https://ollama.com/v1",
 };
 
 type ToolCall = {
