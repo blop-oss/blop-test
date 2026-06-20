@@ -87,6 +87,8 @@ export type BlopRunOptions = {
   maxSteps?: number;
   timeoutMs?: number;
   retries?: number;
+  /** Number of agent tests to run concurrently. Defaults to 1. */
+  workers?: number;
   platformUrl?: string;
   platformApiKey?: string;
   browserContext?: BrowserContextOptions;
