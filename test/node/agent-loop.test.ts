@@ -114,6 +114,65 @@ async function collect(
 }
 
 describe("runBrowserAgentStream", () => {
+  test("attaches tool-provided image evidence to the next model turn", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      toolCallTurn("inspect_run", "{}"),
+      toolCallTurn("finish_test", JSON.stringify({ status: "passed", reason: "reviewed" })),
+    ];
+    const fetchFn = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return responses.shift()!;
+    }) as typeof fetch;
+    const tools = [
+      {
+        name: "inspect_run",
+        description: "Inspect a run",
+        parameters: { type: "object", properties: {} },
+        promptSnippet: "- inspect_run: inspect evidence",
+        execute: async () => ({
+          content: "Two screenshots are attached.",
+          modelImages: [
+            {
+              dataUrl: "data:image/png;base64,aGVsbG8=",
+              caption: "Homepage after navigation",
+            },
+          ],
+        }),
+      },
+      {
+        name: "finish_test",
+        description: "Finish",
+        parameters: { type: "object", properties: {} },
+        promptSnippet: "- finish_test: finish",
+        execute: async () => ({ content: "passed" }),
+      },
+    ];
+
+    for await (const _event of runBrowserAgentStream({
+      prompt: "Review the run",
+      provider: "openrouter",
+      model: "test/model",
+      apiKey: "key",
+      nativeTools: tools,
+      ...({ fetchFn } as Record<string, unknown>),
+    })) {
+      // drain
+    }
+
+    const secondMessages = requests[1].messages as Array<Record<string, unknown>>;
+    const evidence = secondMessages.find(
+      (message) => message.role === "user" && Array.isArray(message.content),
+    ) as { content: Array<Record<string, unknown>> } | undefined;
+    expect(evidence?.content).toEqual([
+      { type: "text", text: "Visual evidence from inspect_run: Homepage after navigation" },
+      {
+        type: "image_url",
+        image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "auto" },
+      },
+    ]);
+  });
+
   test("executes tool calls in-process and stops once finish_test succeeds", async () => {
     const { events, requests, executed } = await collect([
       toolCallTurn("browser_goto", JSON.stringify({ url: "https://example.com" })),
