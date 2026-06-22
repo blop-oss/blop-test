@@ -28,7 +28,7 @@
  *    Groq, xAI, Mistral, Cerebras, and NVIDIA all speak it; for Anthropic or
  *    Google models, route through OpenRouter.
  */
-import type { NativeToolBridge } from "../browser/tools/types.js";
+import type { NativeModelImage, NativeToolBridge } from "../browser/tools/types.js";
 import type { BlopAgentStreamEvent, BlopAgentStreamRunner } from "./types.js";
 
 // Port of RunConfig defaults (orchestrator.rs): max_turns 200, nudge_interval 6.
@@ -64,7 +64,15 @@ type ToolCall = {
 
 type ChatMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | {
+      role: "user";
+      content:
+        | string
+        | Array<
+            | { type: "text"; text: string }
+            | { type: "image_url"; image_url: { url: string; detail: "auto" | "low" | "high" } }
+          >;
+    }
   | {
       role: "assistant";
       content: string | null;
@@ -85,7 +93,18 @@ type ToolExecResult = {
   content: string;
   isError: boolean;
   metadata: Record<string, unknown> | null;
+  modelImages: NativeModelImage[];
 };
+
+const DATA_IMAGE_PATTERN = /^data:image\/(?:png|jpeg|webp);base64,/i;
+const MAX_TOOL_IMAGES_PER_TURN = 5;
+
+function validModelImages(images: NativeModelImage[] | undefined): NativeModelImage[] {
+  if (!images) return [];
+  return images
+    .filter((image) => DATA_IMAGE_PATTERN.test(image.dataUrl))
+    .slice(0, MAX_TOOL_IMAGES_PER_TURN);
+}
 
 export interface AgentLoopOptions {
   prompt: string;
@@ -598,6 +617,7 @@ async function* executeSingleTool(
       content: "Tool not available",
       isError: true,
       metadata: null,
+      modelImages: [],
     };
   }
 
@@ -622,6 +642,7 @@ async function* executeSingleTool(
       content: result.content,
       isError: false,
       metadata: result.metadata ?? null,
+      modelImages: validModelImages(result.modelImages),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -638,6 +659,7 @@ async function* executeSingleTool(
       content: `Error: ${message}`,
       isError: true,
       metadata: null,
+      modelImages: [],
     };
   }
 }
@@ -795,6 +817,7 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
       // Port of execute_tool_calls: blop's browser tools are stateful, so all
       // run sequentially (none are in khadim's PARALLEL_SAFE_TOOLS either).
       let reachedTerminal = false;
+      const modelImages: Array<NativeModelImage & { toolName: string }> = [];
       for (const toolCall of reply.toolCalls) {
         const result = yield* executeSingleTool(toolCall, toolMap);
         messages.push({
@@ -802,8 +825,28 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
           content: result.content,
           tool_call_id: result.toolCallId,
         });
+        for (const image of result.modelImages) {
+          if (modelImages.length >= MAX_TOOL_IMAGES_PER_TURN) break;
+          modelImages.push({ ...image, toolName: result.toolName });
+        }
         if (isTerminalResult(result, terminalTools)) reachedTerminal = true;
         if (opts.signal?.aborted) return;
+      }
+
+      if (modelImages.length > 0) {
+        messages.push({
+          role: "user",
+          content: modelImages.flatMap((image) => [
+            {
+              type: "text" as const,
+              text: `Visual evidence from ${image.toolName}: ${image.caption ?? "Screenshot"}`,
+            },
+            {
+              type: "image_url" as const,
+              image_url: { url: image.dataUrl, detail: image.detail ?? "auto" },
+            },
+          ]),
+        });
       }
 
       // blop: the verdict landed — stop instead of letting the model keep

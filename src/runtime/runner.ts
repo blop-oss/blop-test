@@ -81,6 +81,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   // request failures during the run are environment limits (no internet
   // egress from the sandbox), not app bugs — the agent prompt is told so.
   let hasInternetEgress = true;
+  // True when the browser was launched with web-security disabled (always
+  // for the containerized runner). Surfaced to the agent prompt so it treats
+  // genuine cross-origin requests as exercisable rather than environment
+  // limits.
+  let corsBypassed = false;
   const runOneTest = async (test: BlopAgentTest): Promise<BlopTestResult> => {
     const testId = createId("test");
     const screenshotsDir = join(reportDir, "screenshots", testId);
@@ -136,6 +141,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         context = await browser!.newContext({
           ...options.browserContext,
           viewport: options.viewport ?? options.browserContext?.viewport,
+          // Bypass Content-Security-Policy so the agent can drive flows the
+          // app's own CSP would otherwise block in the sandbox (inline event
+          // handlers, eval-based vendor SDKs, etc.). CSP is a delivery-time
+          // defense, not a behavior the agent is testing for.
+          bypassCSP: true,
         });
       } catch (error) {
         status = "error";
@@ -145,18 +155,55 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       }
 
       const page = await context.newPage();
-      attachBrowserLogListeners(page, browserLogs, attempt);
+      // Registry of every page/tab in this context. The main page is index 0;
+      // popups opened by the app via window.open / target=_blank are appended
+      // in open order. The tab tools (browser_list_pages /
+      // browser_select_page) read this list, and setActivePage swaps the page
+      // every other tool operates on so the agent can interact with a popup
+      // transparently.
+      const pages: Page[] = [page];
+      const attachPageListeners = (popup: Page) => {
+        pages.push(popup);
+        attachBrowserLogListeners(popup, browserLogs, attempt);
+        popup.on("close", () => {
+          const index = pages.indexOf(popup);
+          if (index >= 0) pages.splice(index, 1);
+          // If the agent was on the popup that just closed, fall back to the
+          // main page so the next tool call doesn't target a dead page.
+          if (activePageRef.page === popup) {
+            const main = pages[0];
+            if (main && !main.isClosed()) {
+              activePageRef.page = main;
+              void restartScreencast(main).catch(() => {});
+            }
+          }
+        });
+      };
+      context.on("page", attachPageListeners);
 
+      // The mutable "current page" the tools operate on. Held in a ref object
+      // so the tools' closure sees the latest page after a browser_select_page
+      // call without re-creating the tools.
+      const activePageRef: { page: Page } = { page };
+      const setActivePage = (next: Page) => {
+        activePageRef.page = next;
+        void restartScreencast(next).catch(() => {});
+      };
+
+      // Screencast is chromium-only and bound to one page at a time. When the
+      // active page changes (popup switch), stop the old stream and start a
+      // new one so live frames always reflect what the agent is acting on.
       let screencast: Screencast | null = null;
       const liveFramePath = join(screenshotsDir, "live.jpg");
       const wantStream =
         options.streamFrames !== false && (options.captureStepScreenshots || Boolean(progressPath));
-      if (wantStream) {
+      const streamViewport = options.viewport ?? options.browserContext?.viewport ?? undefined;
+      const startScreencastFor = async (target: Page) => {
+        if (!wantStream) return null;
         let lastFrameEmit = 0;
         const frameIntervalMs = options.frameIntervalMs ?? 200;
-        const streamViewport = options.viewport ?? options.browserContext?.viewport ?? undefined;
-        screencast = await startScreencast({
-          page,
+        return startScreencast({
+          page: target,
           maxWidth: streamViewport?.width,
           maxHeight: streamViewport?.height,
           onFrame: (frame) => {
@@ -181,7 +228,15 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
               });
           },
         });
-      }
+      };
+      const restartScreencast = async (target: Page) => {
+        if (screencast) {
+          try { await screencast.stop(); } catch {}
+          screencast = null;
+        }
+        screencast = await startScreencastFor(target);
+      };
+      if (wantStream) screencast = await startScreencastFor(page);
 
       const finishState: FinishState = { status: null, reason: null };
       const controller = new AbortController();
@@ -193,7 +248,10 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       try {
         const recentActionSignatures: string[] = [];
         const nativeTools = await createBrowserTools({
-          page,
+          page: activePageRef.page,
+          pages,
+          setActivePage,
+          getActivePage: () => activePageRef.page,
           testId,
           screenshotDir: screenshotsDir,
           actions,
@@ -239,6 +297,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
           goal: test.goal,
           baseUrl: test.baseUrl ?? options.baseUrl,
           maxSteps: options.maxSteps,
+          hasInternetEgress,
+          corsBypassed,
         });
 
         let stepCount = 0;
@@ -323,6 +383,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
               goal: test.goal,
               baseUrl: test.baseUrl ?? options.baseUrl,
               maxSteps: options.maxSteps,
+              hasInternetEgress,
+              corsBypassed,
               criticalPoints,
               actions,
             });
@@ -403,6 +465,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         if (attempt > (options.retries ?? 0)) break;
       } finally {
         if (timeout) clearTimeout(timeout);
+        try {
+          context.off("page", attachPageListeners);
+        } catch {
+          // Context may already be closed.
+        }
         if (screencast) {
           try {
             await screencast.stop();
@@ -454,6 +521,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       containerSession = await startPlaywrightContainer(containerOptions);
       browser = containerSession.browser as any;
       hasInternetEgress = containerSession.hasInternetEgress;
+      corsBypassed = containerSession.corsBypassed;
     } else {
       const browserType = { chromium, firefox, webkit }[options.browser ?? "chromium"];
       browser = await browserType.launch({ headless: !options.headed });
@@ -627,7 +695,7 @@ function lastTurnText(events: BlopAgentEvent[]): string {
   return text;
 }
 
-function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean }) {
+function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean; corsBypassed?: boolean }) {
   const startInstruction = input.baseUrl
     ? `The app base URL is ${input.baseUrl}. Resolve relative URLs in the goal against this base URL.`
     : "If the goal requires a URL, use browser_goto with the URL supplied by the test.";
@@ -636,14 +704,50 @@ function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgr
     : "Take as many tool steps as the goal genuinely needs — but never repeat an action that already returned the same result. If you are blocked, gather evidence of the blocker and finish with a failed status instead of retrying in a loop.";
 
   const hasInternetEgress = input.hasInternetEgress !== false;
+  const corsBypassed = input.corsBypassed !== false;
+  const corsRule = corsBypassed
+    ? "- The sandbox browser has web-security disabled and CSP bypassed, so cross-origin requests (OAuth redirects, third-party iframes, cross-origin fetch/XHR) are not blocked by the sandbox itself the way they would be in a vanilla browser. Treat a cross-origin request failure as a real app/provider configuration issue, not a sandbox CORS limitation."
+    : "";
   const thirdPartyRules = hasInternetEgress
     ? "- Distinguish first-party failures from third-party failures. browser_console_logs tags each failed request as [first-party] (same origin as the page) or [third-party] (external service). A [first-party] failure or an uncaught JS error from the site's own bundle is a genuine app bug — cite it as evidence. A [third-party] failure (form providers like web3forms.com, payment/checkout providers like stripe.com/paypal.com/razorpay.com, captcha, analytics) is usually a CORS or provider-side rejection: the site's request did reach the internet, but the provider refused it. Report a [third-party] failure as a real issue the site owner should investigate (wrong API key, missing CORS allowlist, misconfigured endpoint), not as a test-environment limitation — the sandbox has confirmed internet egress.\n- When a form submits to a third-party endpoint (e.g. web3forms.com, Formspree) or a checkout redirects to/handshakes with a third-party payment provider (e.g. Stripe, PayPal), exercise the real flow end-to-end and verify the site's success and failure handling. For payment providers that use test mode, use the provider's documented test cards (e.g. Stripe test card 4242 4242 4242 4242, expiry any future date, any CVC) and test keys — never real card numbers. If the provider rejects the request with a CORS or auth error, report it as a real configuration issue the site owner must fix, and flag the specific error from browser_console_logs."
     : "- Distinguish first-party failures from third-party/environment failures. This test sandbox has NO confirmed internet egress, so requests to external services cannot succeed regardless of how the site is configured. browser_console_logs tags each failed request as [first-party] (same origin as the page) or [third-party] (external service). A [first-party] failure or an uncaught JS error from the site's own bundle is a genuine app bug — cite it as evidence. A [third-party] failure (form providers like web3forms.com, payment/checkout providers like stripe.com/paypal.com/razorpay.com, captcha, analytics) is a test-environment limitation here, NOT an app bug: the sandbox cannot reach the internet, so the failure does not reflect the site's wiring. Do not fail the site solely because a [third-party] endpoint is unreachable; note it as a test-environment caveat in your reason and keep evaluating the rest of the flow.\n- When a form submits to a third-party endpoint (e.g. web3forms.com, Formspree) or a checkout redirects to/handshakes with a third-party payment provider (e.g. Stripe, PayPal), verify the client-side submission behavior instead of requiring the external round-trip to succeed: the form fields are present and required validation fires before submit, the submit action triggers the outbound request, and the site handles a failed response gracefully (error UI, not a silent hang). Treat the conversion path as working if the site wired it up correctly, and flag only the unreachable third-party as a test-environment caveat in your reason. For payment providers, note that the site owner should test with the provider's documented test cards (e.g. Stripe test card 4242 4242 4242 4242) and test keys once egress is available.";
 
-  return `How to act (critical):\n- Act only by calling the provided browser tools through the tool-calling interface, one or more calls per turn.\n- Never write a tool call as message text. No pseudo-XML tags, no token markers, no JSON arguments in prose: text like that is discarded and no action happens.\n- The test ends only when you call finish_test with status and reason. A plain-text reply without a tool call aborts the run as unfinished, and any findings in it are lost.\n- When the goal is complete or blocked, your next tool call is finish_test. Put your summary or feedback in its reason field, not in a text message.\n\nRules:\n- ${startInstruction}\n- Start by decomposing the goal into critical points: every explicit page, action, assertion, filter, sort, selection, value, or final datum that must be proven.\n- Use browser_snapshot before important actions; it includes visible text plus ARIA roles/labels. Prefer role, label, placeholder, test id, or text targets over brittle CSS.\n- Use record_critical_point for each requirement. Mark a point passed only when a deterministic assertion, URL, visible text, screenshot, or action output proves it.\n- Prefer deterministic assertions such as browser_expect_text, browser_expect_url, browser_expect_value, browser_expect_checked, browser_expect_visible, browser_expect_count, and browser_expect_attribute before passing. They auto-retry until timeoutMs (default 5000ms), so do not pad them with manual waits; raise timeoutMs for slow UIs instead.\n- For lists, tables, rankings, sorts, and counts, use browser_extract to read the visible data of ALL matching elements in one call, then compare. Never read rows one by one or eyeball order from a screenshot.\n- When you can already predict a deterministic sequence (fill, click, assert), batch it with browser_run_steps in one call instead of one call per action. Explore with browser_snapshot first; never batch steps you are unsure about.\n- When submitting a form (sign in, create account, checkout), first fill EVERY required field the form shows — snapshot the form and do not assume it is just email + password; account/signup forms often also require a name, username, password confirmation, or a terms checkbox. If a submit click or Enter reports that the form did not submit because fields are invalid, fill the named fields and submit again rather than re-clicking or treating the button as dead.\n- If the app looks broken (blank page, dead button, missing data), check browser_console_logs for uncaught errors and failed requests, and cite the log line as evidence before failing the test as an app bug.\n${thirdPartyRules}\n- Capture screenshots only when they add useful evidence. When one element or region proves the point, pass target to browser_screenshot so the screenshot captures the smallest relevant area; avoid fullPage unless the whole layout is the evidence.\n- Do not guess UI state. If selected state is hidden after a drawer, accordion, modal, or dropdown closes, reopen it or capture a visible chip/summary before treating it as verified.\n- If a site exposes a dedicated control for a requirement, use that control. A broad search query does not satisfy explicit filters, sorts, styles, attributes, or rankings.\n- Ranking words such as cheapest, latest, highest-rated, best-selling, or most reviewed must be grounded in the app's actual sort/filter or visible metric.\n- Numeric, date, quantity, and unit constraints must be exact. Wider buckets or broadened defaults are failures unless no exact control exists.\n- Empty results are acceptable only after the correct filters/actions were applied and evidenced.\n- For blocker claims, capture current evidence and only fail after repeated evidence from the actual UI.\n- Only use the provided browser tools; do not change files or invoke external processes.\n- ${budgetInstruction}\n- You must finish by calling finish_test with status and reason. Use passed only after all critical points are passed or otherwise proven by deterministic assertions.\n`;
+  const popupRules = "- When a click opens a new tab or popup (window.open, target=_blank, OAuth/login popup), call browser_list_pages to discover it, then browser_select_page with its index to switch the active page to it before interacting with its contents. Use browser_snapshot after switching to read the popup. Use browser_close_page to dismiss popups you no longer need. The main page is always index 0.";
+
+  return [
+    "How to act (critical):",
+    "- Act only by calling the provided browser tools through the tool-calling interface, one or more calls per turn.",
+    "- Never write a tool call as message text. No pseudo-XML tags, no token markers, no JSON arguments in prose: text like that is discarded and no action happens.",
+    "- The test ends only when you call finish_test with status and reason. A plain-text reply without a tool call aborts the run as unfinished, and any findings in it are lost.",
+    "- When the goal is complete or blocked, your next tool call is finish_test. Put your summary or feedback in its reason field, not in a text message.",
+    "",
+    "Rules:",
+    `- ${startInstruction}`,
+    "- Start by decomposing the goal into critical points: every explicit page, action, assertion, filter, sort, selection, value, or final datum that must be proven.",
+    "- Use browser_snapshot before important actions; it includes visible text plus ARIA roles/labels. Prefer role, label, placeholder, test id, or text targets over brittle CSS.",
+    "- Use record_critical_point for each requirement. Mark a point passed only when a deterministic assertion, URL, visible text, screenshot, or action output proves it.",
+    "- Prefer deterministic assertions such as browser_expect_text, browser_expect_url, browser_expect_value, browser_expect_checked, browser_expect_visible, browser_expect_count, and browser_expect_attribute before passing. They auto-retry until timeoutMs (default 5000ms), so do not pad them with manual waits; raise timeoutMs for slow UIs instead.",
+    "- For lists, tables, rankings, sorts, and counts, use browser_extract to read the visible data of ALL matching elements in one call, then compare. Never read rows one by one or eyeball order from a screenshot.",
+    "- When you can already predict a deterministic sequence (fill, click, assert), batch it with browser_run_steps in one call instead of one call per action. Explore with browser_snapshot first; never batch steps you are unsure about.",
+    "- When submitting a form (sign in, create account, checkout), first fill EVERY required field the form shows — snapshot the form and do not assume it is just email + password; account/signup forms often also require a name, username, password confirmation, or a terms checkbox. If a submit click or Enter reports that the form did not submit because fields are invalid, fill the named fields and submit again rather than re-clicking or treating the button as dead.",
+    "- If the app looks broken (blank page, dead button, missing data), check browser_console_logs for uncaught errors and failed requests, and cite the log line as evidence before failing the test as an app bug.",
+    `- ${popupRules}`,
+    ...(corsBypassed ? [corsRule] : []),
+    thirdPartyRules,
+    "- Capture screenshots only when they add useful evidence. When one element or region proves the point, pass target to browser_screenshot so the screenshot captures the smallest relevant area; avoid fullPage unless the whole layout is the evidence.",
+    "- Do not guess UI state. If selected state is hidden after a drawer, accordion, modal, or dropdown closes, reopen it or capture a visible chip/summary before treating it as verified.",
+    "- If a site exposes a dedicated control for a requirement, use that control. A broad search query does not satisfy explicit filters, sorts, styles, attributes, or rankings.",
+    "- Ranking words such as cheapest, latest, highest-rated, best-selling, or most reviewed must be grounded in the app's actual sort/filter or visible metric.",
+    "- Numeric, date, quantity, and unit constraints must be exact. Wider buckets or broadened defaults are failures unless no exact control exists.",
+    "- Empty results are acceptable only after the correct filters/actions were applied and evidenced.",
+    "- For blocker claims, capture current evidence and only fail after repeated evidence from the actual UI.",
+    "- Only use the provided browser tools; do not change files or invoke external processes.",
+    `- ${budgetInstruction}`,
+    "- You must finish by calling finish_test with status and reason. Use passed only after all critical points are passed or otherwise proven by deterministic assertions.",
+  ].join("\n");
 }
 
-function buildPrompt(input: { name: string; goal: string; baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean }) {
+function buildPrompt(input: { name: string; goal: string; baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean; corsBypassed?: boolean }) {
   return `You are running an agentic browser E2E test.\n\nTest name: ${input.name}\n\nGoal:\n${input.goal}\n\n${promptBody(input)}`;
 }
 
@@ -653,6 +757,7 @@ function buildResumePrompt(input: {
   baseUrl?: string;
   maxSteps?: number;
   hasInternetEgress?: boolean;
+  corsBypassed?: boolean;
   criticalPoints: BlopCriticalPoint[];
   actions: BlopTestResult["actions"];
 }) {
