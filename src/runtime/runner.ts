@@ -741,6 +741,7 @@ function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgr
     "- Numeric, date, quantity, and unit constraints must be exact. Wider buckets or broadened defaults are failures unless no exact control exists.",
     "- Empty results are acceptable only after the correct filters/actions were applied and evidenced.",
     "- For blocker claims, capture current evidence and only fail after repeated evidence from the actual UI.",
+    "- If the same interaction (click, type, select) fails after 3 different targeting strategies (e.g. role, text, selector), call browser_snapshot to inspect the actual page structure. If the element is genuinely not clickable or not present, record the critical point as failed with the evidence, and either try a fundamentally different approach or finish the test. Do not keep cycling through selector variants — a real user who cannot tap a product card bounces immediately, so 3 failed attempts is a critical blocker, not a retry opportunity.",
     "- Only use the provided browser tools; do not change files or invoke external processes.",
     `- ${budgetInstruction}`,
     "- You must finish by calling finish_test with status and reason. Use passed only after all critical points are passed or otherwise proven by deterministic assertions.",
