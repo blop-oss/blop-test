@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { stopPlaywrightContainer } from "../../src/node/playwright-container";
+import { stopPlaywrightContainer } from "@blopai/browser-harness";
 import { runBlopTests } from "../../src/runtime/runner";
 import type { BlopAgentStreamRunner } from "../../src/runtime/types";
 import { createTempDir, writeSpec } from "../test-utils/files";

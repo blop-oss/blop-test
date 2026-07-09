@@ -28,7 +28,7 @@
  *    Groq, xAI, Mistral, Cerebras, and NVIDIA all speak it; for Anthropic or
  *    Google models, route through OpenRouter.
  */
-import type { NativeModelImage, NativeToolBridge } from "../browser/tools/types.js";
+import type { NativeModelImage, NativeToolBridge } from "@blopai/browser-harness";
 import type { BlopAgentStreamEvent, BlopAgentStreamRunner } from "./types.js";
 
 // Port of RunConfig defaults (orchestrator.rs): max_turns 200, nudge_interval 6.

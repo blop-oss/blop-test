@@ -1,5 +1,5 @@
 import { chromium, type Browser } from "playwright";
-import { createBrowserTools } from "./src/browser/tools";
+import { createBrowserTools } from "@blopai/browser-harness";
 import { startFixtureServer } from "./test/test-utils/server";
 
 async function phase<T>(label: string, fn: () => Promise<T>): Promise<T> {

@@ -1,4 +1,3 @@
-import "./node/bun-ws-compat.js";
 export { agentTest, defineAgentTest, describe } from "./runtime/spec.js";
 export { runBlopTest, runBlopTests } from "./runtime/runner.js";
 export {

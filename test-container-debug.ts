@@ -1,4 +1,4 @@
-import { startPlaywrightContainer } from "./src/node/playwright-container.js";
+import { startPlaywrightContainer } from "@blopai/browser-harness";
 
 console.log("Starting container...");
 try {

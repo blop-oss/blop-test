@@ -1,15 +1,19 @@
-import "../node/bun-ws-compat.js";
+import {
+  createBrowserTools,
+  startPlaywrightContainer,
+  startScreencast,
+  type FinishState,
+  type PlaywrightContainerSession,
+  type Screencast,
+} from "@blopai/browser-harness";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { runBrowserAgentStream } from "./agent-loop.js";
 import { chromium, firefox, webkit, type Page } from "playwright";
-import { createBrowserTools, type FinishState } from "../browser/tools.js";
-import { startScreencast, type Screencast } from "../browser/screencast.js";
 import { getCiMetadata } from "../node/ci.js";
-import { startPlaywrightContainer, type PlaywrightContainerSession } from "../node/playwright-container.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
+import { runBrowserAgentStream } from "./agent-loop.js";
 import { loadAgentTests } from "./spec.js";
 import type { BlopAgentEvent, BlopAgentTest, BlopBrowserLog, BlopCriticalPoint, BlopRunOptions, BlopRunResult, BlopScreenshot, BlopTestResult, BlopTestStatus } from "./types.js";
 
@@ -622,8 +626,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 
   try {
     await uploadRunToPlatform({
-      platformUrl: options.platformUrl ?? process.env.BLOP_PLATFORM_URL,
-      apiKey: options.platformApiKey ?? process.env.BLOP_API_KEY,
+      ingestUrl: options.platformUrl ?? process.env.BLOP_INGEST_URL,
+      ingestSecret: options.platformApiKey ?? process.env.BLOP_INGEST_SECRET,
+      projectId: process.env.BLOP_PROJECT_ID,
+      trigger: process.env.BLOP_TRIGGER,
+      reportDir,
       result,
     });
   } catch (error) {
