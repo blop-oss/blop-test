@@ -29,7 +29,7 @@
  *    Google models, route through OpenRouter.
  */
 import type { NativeModelImage, NativeToolBridge } from "@blopai/browser-harness";
-import type { BlopAgentStreamEvent, BlopAgentStreamRunner } from "./types.js";
+import type { BlopAgentStreamEvent, BlopAgentStreamRunner, BlopReasoningEffort } from "./types.js";
 
 // Port of RunConfig defaults (orchestrator.rs): max_turns 200, nudge_interval 6.
 const MAX_TURNS = 200;
@@ -112,6 +112,7 @@ export interface AgentLoopOptions {
   provider?: string;
   model?: string;
   apiKey?: string;
+  reasoningEffort?: BlopReasoningEffort;
   /** Unused; accepted for signature compatibility with the khadim wrapper. */
   cwd?: string;
   nativeTools: unknown[];
@@ -438,6 +439,7 @@ async function* streamChatCompletion(input: {
   model: string;
   messages: ChatMessage[];
   tools: NativeToolBridge[];
+  reasoningEffort?: BlopReasoningEffort;
   turnIndex: number;
   signal?: AbortSignal;
   fetchFn: typeof fetch;
@@ -449,6 +451,7 @@ async function* streamChatCompletion(input: {
     tool_choice: "auto",
     stream: true,
     stream_options: { include_usage: true },
+    ...(input.reasoningEffort ? { reasoning_effort: input.reasoningEffort } : {}),
     // khadim omits temperature for reasoning-capable models; unknown models
     // resolve as reasoning (models.rs base_model is_reasoning=true), so runs
     // through khadim never sent temperature. Mirror that.
@@ -784,6 +787,7 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
   const provider = opts.provider?.trim() || "openrouter";
   const model = opts.model?.trim();
   const apiKey = opts.apiKey?.trim();
+  const reasoningEffort = opts.reasoningEffort;
   if (!model) throw new Error("No model configured for the blop agent loop");
   if (!apiKey) throw new Error(`Missing API key for provider '${provider}'`);
 
@@ -834,6 +838,7 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
           model,
           messages,
           tools,
+          reasoningEffort,
           turnIndex,
           signal: opts.signal,
           fetchFn,

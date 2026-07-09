@@ -6,6 +6,8 @@ export type BlopReporter = "basic" | "json" | "junit" | "all";
 
 export type BlopBrowserName = "chromium" | "firefox" | "webkit";
 
+export type BlopReasoningEffort = "none" | "low" | "medium" | "high" | "max";
+
 export type BlopAgentStreamEvent = {
   event_type: string;
   content?: string | null;
@@ -19,6 +21,7 @@ export type BlopAgentStreamRunner = (options: {
   provider?: string;
   model?: string;
   apiKey?: string;
+  reasoningEffort?: BlopReasoningEffort;
   cwd?: string;
   nativeTools: unknown[];
   signal?: AbortSignal;
@@ -78,6 +81,8 @@ export type BlopRunOptions = {
   provider?: string;
   model?: string;
   apiKey?: string;
+  /** Provider reasoning budget when supported by the OpenAI-compatible API. */
+  reasoningEffort?: BlopReasoningEffort;
   cwd?: string;
   /**
    * Optional hard cap on agent tool steps. Unset by default: the agent runs

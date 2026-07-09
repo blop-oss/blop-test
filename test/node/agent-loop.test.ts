@@ -196,6 +196,24 @@ describe("runBrowserAgentStream", () => {
     expect(system.content).toContain("- browser_goto: navigate to a URL");
   });
 
+  test("sends an explicit reasoning effort to compatible providers", async () => {
+    const harness = makeHarness([
+      toolCallTurn("finish_test", JSON.stringify({ status: "passed", reason: "done" })),
+    ]);
+    for await (const _event of runBrowserAgentStream({
+      prompt: "Verify the page",
+      provider: "ollama",
+      model: "test/model",
+      apiKey: "key",
+      reasoningEffort: "low",
+      nativeTools: harness.tools,
+      fetchFn: harness.fetchFn,
+    })) {
+      // drain
+    }
+    expect(harness.requests[0].reasoning_effort).toBe("low");
+  });
+
   test("compacts stale snapshots in model history", () => {
     const longSnapshot = JSON.stringify({
       url: "https://example.com/old",

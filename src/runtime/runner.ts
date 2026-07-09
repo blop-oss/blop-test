@@ -316,6 +316,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             provider: options.provider ?? process.env.BLOP_AGENT_PROVIDER,
             model: options.model ?? process.env.BLOP_AGENT_MODEL,
             apiKey: options.apiKey ?? process.env.BLOP_AGENT_API_KEY,
+            reasoningEffort: options.reasoningEffort,
             cwd: options.cwd ?? process.cwd(),
             nativeTools,
             signal: controller.signal,
