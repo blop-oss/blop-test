@@ -98,6 +98,48 @@ describe("runner step limits", () => {
     expect(result.results[0].actions.length).toBeLessThan(20);
   }, 60_000);
 
+  test("aborts a repeated action cycle despite volatile snapshot text", async () => {
+    const temp = await createTempDir();
+    cleanup = temp.cleanup;
+    const server = await startFixtureServer([
+      {
+        path: "/",
+        body: `<main>
+          <label>Search <input aria-label="Search" /></label>
+          <button onclick="document.querySelector('#counter').textContent = String(Date.now())">Search</button>
+          <span id="counter">0</span>
+        </main>`,
+      },
+    ]);
+    closeServer = server.close;
+    const specFile = await writeSpec(temp.dir, "volatile-cycle.blop.ts", `
+      import { defineAgentTest } from "${process.cwd()}/src/index.ts";
+      export default defineAgentTest({ name: "volatile cycle", goal: "Exercise cycle detection." });
+    `);
+    const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools, signal }) {
+      const tools = nativeTools as Array<Tool>;
+      await tool(tools, "browser_goto").execute({ url: server.url });
+      for (let index = 0; index < 30; index += 1) {
+        if (signal?.aborted) return;
+        await tool(tools, "browser_type").execute({ target: { label: "Search" }, text: "Seattle" });
+        await tool(tools, "browser_click").execute({ target: { role: "button", name: "Search" } });
+        await tool(tools, "browser_snapshot").execute({});
+        yield { event_type: "step_start", content: "cycle", metadata: { tool: "browser_snapshot" } };
+      }
+    };
+
+    const result = await runBlopTests({
+      specFiles: [specFile],
+      reportDir: join(temp.dir, ".blop"),
+      agentStream,
+      reporter: "json",
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.results[0].reason).toContain("short browser-action cycle repeated");
+    expect(result.results[0].actions.length).toBeLessThan(30);
+  }, 60_000);
+
   test("still enforces an explicit maxSteps cap", async () => {
     const { temp, server, specFile } = await setup("capped run");
     const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools, signal }) {

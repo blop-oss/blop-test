@@ -15,20 +15,18 @@ import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
 import { runBrowserAgentStream } from "./agent-loop.js";
 import { loadAgentTests } from "./spec.js";
-import type { BlopAgentEvent, BlopAgentTest, BlopBrowserLog, BlopCriticalPoint, BlopRunOptions, BlopRunResult, BlopScreenshot, BlopTestResult, BlopTestStatus } from "./types.js";
+import type { BlopAction, BlopAgentEvent, BlopAgentTest, BlopBrowserLog, BlopCriticalPoint, BlopRunOptions, BlopRunResult, BlopScreenshot, BlopTestResult, BlopTestStatus } from "./types.js";
 
 // There is no default step cap: the agent keeps working until it calls
 // finish_test, the test times out, or the stall guard below trips. An explicit
 // maxSteps still acts as a hard cap for callers that want one.
 //
-// Stall guard: a window of recent action signatures (tool + input + output).
-// When the window is full and the agent is cycling through at most
-// STALL_UNIQUE_THRESHOLD distinct signatures, nothing on the page is changing
-// and no new evidence is being produced — the run is aborted instead of
-// looping forever. Legitimate repetition (e.g. paging with identical clicks)
-// stays distinct because each page yields different action output.
-const STALL_WINDOW = 12;
-const STALL_UNIQUE_THRESHOLD = 2;
+// Stall guard: detect a short action cycle repeated six times. Snapshot output
+// contributes a coarse page-state fingerprint with volatile numbers removed,
+// so clocks/temperatures cannot disguise a loop while genuinely different page
+// content (for example pagination) remains distinct.
+const STALL_MAX_CYCLE_LENGTH = 4;
+const STALL_CYCLE_REPEATS = 6;
 
 // Resume guard: small models sometimes end a turn with planning prose and no
 // tool call, which ends the agent session even though the test is mid-flight.
@@ -268,17 +266,13 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
           captureStepScreenshots: options.captureStepScreenshots,
           liveFrame: () => screencast?.latest() ?? null,
           onAction: (action) => {
-            recentActionSignatures.push(
-              `${action.name}|${JSON.stringify(action.input)}|${action.output}`,
-            );
-            if (recentActionSignatures.length > STALL_WINDOW) recentActionSignatures.shift();
-            if (
-              recentActionSignatures.length === STALL_WINDOW &&
-              new Set(recentActionSignatures).size <= STALL_UNIQUE_THRESHOLD
-            ) {
+            recentActionSignatures.push(actionCycleSignature(action));
+            const maxHistory = STALL_MAX_CYCLE_LENGTH * STALL_CYCLE_REPEATS;
+            if (recentActionSignatures.length > maxHistory) recentActionSignatures.shift();
+            if (hasRepeatedActionCycle(recentActionSignatures)) {
               controller.abort(
                 new Error(
-                  `The agent appears to be stuck: the last ${STALL_WINDOW} browser actions cycled through the same calls with identical results. The run was stopped to avoid an endless loop.`,
+                  `The agent appears to be stuck: a short browser-action cycle repeated ${STALL_CYCLE_REPEATS} times without meaningful page-state progress. The run was stopped to avoid an endless loop.`,
                 ),
               );
             }
@@ -639,6 +633,46 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   }
 
   return result;
+}
+
+function actionCycleSignature(action: BlopAction): string {
+  const base = `${action.name}|${JSON.stringify(action.input)}`;
+  if (action.name !== "browser_snapshot") return base;
+  try {
+    const snapshot = JSON.parse(action.output) as {
+      url?: unknown;
+      title?: unknown;
+      text?: unknown;
+      ariaSnapshot?: unknown;
+    };
+    const state = [snapshot.url, snapshot.title, snapshot.text, snapshot.ariaSnapshot]
+      .map((value) => String(value ?? ""))
+      .join("|")
+      .toLowerCase()
+      .replace(/\d+(?:[.:/-]\d+)*/g, "#")
+      .replace(/\s+/g, " ")
+      .slice(0, 4_000);
+    return `${base}|${state}`;
+  } catch {
+    return `${base}|${action.output.slice(0, 4_000)}`;
+  }
+}
+
+function hasRepeatedActionCycle(signatures: string[]): boolean {
+  for (let cycleLength = 1; cycleLength <= STALL_MAX_CYCLE_LENGTH; cycleLength += 1) {
+    const required = cycleLength * STALL_CYCLE_REPEATS;
+    if (signatures.length < required) continue;
+    const start = signatures.length - required;
+    let repeated = true;
+    for (let index = start + cycleLength; index < signatures.length; index += 1) {
+      if (signatures[index] !== signatures[start + ((index - start) % cycleLength)]) {
+        repeated = false;
+        break;
+      }
+    }
+    if (repeated) return true;
+  }
+  return false;
 }
 
 /** Resolve the screenshot file an action produced, if any, for progress streaming. */
