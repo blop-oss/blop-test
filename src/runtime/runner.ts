@@ -732,6 +732,7 @@ function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgr
     `- ${startInstruction}`,
     "- Start by decomposing the goal into critical points: every explicit page, action, assertion, filter, sort, selection, value, or final datum that must be proven.",
     "- Use browser_snapshot before important actions; it includes visible text plus ARIA roles/labels. Prefer role, label, placeholder, test id, or text targets over brittle CSS.",
+    "- ARIA snapshot lines describe elements; they are not selectors. Convert `button \"Save\"` to target { role: \"button\", name: \"Save\" }, and `textbox \"Location\"` to { role: \"textbox\", name: \"Location\" }. Never paste the whole ARIA line into a target string.",
     "- Use record_critical_point for each requirement. Mark a point passed only when a deterministic assertion, URL, visible text, screenshot, or action output proves it.",
     "- Prefer deterministic assertions such as browser_expect_text, browser_expect_url, browser_expect_value, browser_expect_checked, browser_expect_visible, browser_expect_count, and browser_expect_attribute before passing. They auto-retry until timeoutMs (default 5000ms), so do not pad them with manual waits; raise timeoutMs for slow UIs instead.",
     "- For lists, tables, rankings, sorts, and counts, use browser_extract to read the visible data of ALL matching elements in one call, then compare. Never read rows one by one or eyeball order from a screenshot.",

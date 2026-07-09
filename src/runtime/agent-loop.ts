@@ -79,7 +79,7 @@ type ChatMessage =
       tool_calls: ToolCall[];
       reasoning_content: string | null;
     }
-  | { role: "tool"; content: string; tool_call_id: string };
+  | { role: "tool"; content: string; tool_call_id: string; tool_name?: string };
 
 type AssistantReply = {
   content: string;
@@ -98,6 +98,7 @@ type ToolExecResult = {
 
 const DATA_IMAGE_PATTERN = /^data:image\/(?:png|jpeg|webp);base64,/i;
 const MAX_TOOL_IMAGES_PER_TURN = 5;
+const MAX_STALE_TOOL_RESULT_CHARS = 1600;
 
 function validModelImages(images: NativeModelImage[] | undefined): NativeModelImage[] {
   if (!images) return [];
@@ -251,7 +252,24 @@ export function toOpenAiMessages(messages: ChatMessage[]): Record<string, unknow
     }
   };
 
-  for (const message of messages) {
+  let latestToolResultIndex = -1;
+  let latestSnapshotIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (latestToolResultIndex < 0 && message.role === "tool") {
+      latestToolResultIndex = index;
+    }
+    if (
+      latestSnapshotIndex < 0 &&
+      message.role === "tool" &&
+      message.tool_name === "browser_snapshot"
+    ) {
+      latestSnapshotIndex = index;
+    }
+    if (latestToolResultIndex >= 0 && latestSnapshotIndex >= 0) break;
+  }
+
+  for (const [messageIndex, message] of messages.entries()) {
     if (message.role === "system" || message.role === "user") {
       flushOrphanedToolResults();
       pendingToolCalls = [];
@@ -299,13 +317,43 @@ export function toOpenAiMessages(messages: ChatMessage[]): Record<string, unknow
     existingToolResults.add(normalizedId);
     converted.push({
       role: "tool",
-      content: message.content,
+      content: compactToolResultForHistory(
+        message,
+        messageIndex,
+        latestToolResultIndex,
+        latestSnapshotIndex,
+      ),
       tool_call_id: normalizedId,
     });
   }
 
   flushOrphanedToolResults();
   return converted;
+}
+
+function compactToolResultForHistory(
+  message: Extract<ChatMessage, { role: "tool" }>,
+  messageIndex: number,
+  latestToolResultIndex: number,
+  latestSnapshotIndex: number,
+): string {
+  if (message.tool_name === "browser_snapshot" && messageIndex !== latestSnapshotIndex) {
+    try {
+      const snapshot = JSON.parse(message.content) as { url?: unknown; title?: unknown };
+      return `[Older browser snapshot superseded by a newer snapshot. URL: ${String(snapshot.url ?? "unknown")}; title: ${String(snapshot.title ?? "unknown")}]`;
+    } catch {
+      return "[Older browser snapshot superseded by a newer snapshot.]";
+    }
+  }
+
+  if (
+    messageIndex !== latestToolResultIndex &&
+    message.content.length > MAX_STALE_TOOL_RESULT_CHARS
+  ) {
+    const firstLine = message.content.split("\n", 1)[0];
+    return `${firstLine}\n[Older tool result compacted; inspect the current page with browser_snapshot if needed.]`;
+  }
+  return message.content;
 }
 
 /** Port of transform_messages.rs to_openai_tools. */
@@ -824,6 +872,7 @@ export const runBrowserAgentStream: BlopAgentStreamRunner = async function* (opt
           role: "tool",
           content: result.content,
           tool_call_id: result.toolCallId,
+          tool_name: result.toolName,
         });
         for (const image of result.modelImages) {
           if (modelImages.length >= MAX_TOOL_IMAGES_PER_TURN) break;

@@ -196,6 +196,30 @@ describe("runBrowserAgentStream", () => {
     expect(system.content).toContain("- browser_goto: navigate to a URL");
   });
 
+  test("compacts stale snapshots in model history", () => {
+    const longSnapshot = JSON.stringify({
+      url: "https://example.com/old",
+      title: "Old page",
+      text: "x".repeat(5000),
+    });
+    const currentSnapshot = JSON.stringify({
+      url: "https://example.com/current",
+      title: "Current page",
+      text: "y".repeat(5000),
+    });
+    const messages = toOpenAiMessages([
+      { role: "assistant", content: null, reasoning_content: null, tool_calls: [{ id: "old", type: "function", function: { name: "browser_snapshot", arguments: "{}" } }] },
+      { role: "tool", content: longSnapshot, tool_call_id: "old", tool_name: "browser_snapshot" },
+      { role: "assistant", content: null, reasoning_content: null, tool_calls: [{ id: "current", type: "function", function: { name: "browser_snapshot", arguments: "{}" } }] },
+      { role: "tool", content: currentSnapshot, tool_call_id: "current", tool_name: "browser_snapshot" },
+    ]);
+
+    const toolMessages = messages.filter((message) => message.role === "tool");
+    expect(String(toolMessages[0].content)).toContain("superseded by a newer snapshot");
+    expect(String(toolMessages[0].content).length).toBeLessThan(200);
+    expect(toolMessages[1].content).toBe(currentSnapshot);
+  });
+
   test("nudges past a text-only turn instead of ending the run", async () => {
     const { events, requests, executed } = await collect([
       textTurn("Let me continue exploring the page."),
