@@ -16,6 +16,7 @@ export type {
   BlopAgentTest,
   BlopAgentTestContext,
   BlopAgentTestHandler,
+  BlopBrowserName,
   BlopCiMetadata,
   BlopReporter,
   BlopReasoningEffort,

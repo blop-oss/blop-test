@@ -4,7 +4,9 @@ export type BlopTestStatus = "passed" | "failed" | "error";
 
 export type BlopReporter = "basic" | "json" | "junit" | "all";
 
-export type BlopBrowserName = "chromium" | "firefox" | "webkit";
+export const BLOP_BROWSER_NAMES = ["chromium", "camoufox", "firefox", "webkit"] as const;
+
+export type BlopBrowserName = (typeof BLOP_BROWSER_NAMES)[number];
 
 export type BlopReasoningEffort = "none" | "low" | "medium" | "high" | "max";
 

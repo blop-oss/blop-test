@@ -140,6 +140,81 @@ describe("runner step limits", () => {
     expect(result.results[0].actions.length).toBeLessThan(30);
   }, 60_000);
 
+  test("aborts a repeated cycle with opaque snapshot references", async () => {
+    const temp = await createTempDir();
+    cleanup = temp.cleanup;
+    const server = await startFixtureServer([
+      {
+        path: "/",
+        body: `<main>
+          <div tabindex="0" onclick="document.querySelector('#counter').textContent = String(Date.now())">Search</div>
+          <span id="counter">0</span>
+        </main>`,
+      },
+    ]);
+    closeServer = server.close;
+    const specFile = await writeSpec(temp.dir, "reference-cycle.blop.ts", `
+      import { defineAgentTest } from "${process.cwd()}/src/index.ts";
+      export default defineAgentTest({ name: "reference cycle", goal: "Exercise reference cycle detection." });
+    `);
+    const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools, signal }) {
+      const tools = nativeTools as Array<Tool>;
+      await tool(tools, "browser_goto").execute({ url: server.url });
+      for (let index = 0; index < 30; index += 1) {
+        if (signal?.aborted) return;
+        const snapshot = await tool(tools, "browser_snapshot").execute({});
+        const semanticSnapshot = JSON.parse(snapshot.content).semanticSnapshot as string;
+        const ref = semanticSnapshot.match(/\[(x\d+)\] interactive "Search"/)?.[1];
+        if (!ref) throw new Error("Search reference missing from snapshot.");
+        await tool(tools, "browser_click").execute({ target: { ref } });
+        yield { event_type: "step_start", content: "cycle", metadata: { tool: "browser_click" } };
+      }
+    };
+
+    const result = await runBlopTests({
+      specFiles: [specFile],
+      reportDir: join(temp.dir, ".blop"),
+      agentStream,
+      reporter: "json",
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.results[0].reason).toContain("short browser-action cycle repeated");
+    expect(result.results[0].actions.length).toBeLessThan(20);
+  }, 60_000);
+
+  test("does not normalize ref-shaped text outside a ref field", async () => {
+    const temp = await createTempDir();
+    cleanup = temp.cleanup;
+    const server = await startFixtureServer([
+      { path: "/", body: `<label>Code <input aria-label="Code" /></label>` },
+    ]);
+    closeServer = server.close;
+    const specFile = await writeSpec(temp.dir, "ref-shaped-text.blop.ts", `
+      import { defineAgentTest } from "${process.cwd()}/src/index.ts";
+      export default defineAgentTest({ name: "ref-shaped text", goal: "Exercise reference normalization scope." });
+    `);
+    const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools }) {
+      const tools = nativeTools as Array<Tool>;
+      await tool(tools, "browser_goto").execute({ url: server.url });
+      for (let index = 0; index < 8; index += 1) {
+        await tool(tools, "browser_type").execute({ target: { label: "Code" }, text: `x${index}` });
+        yield { event_type: "step_start", content: "type", metadata: { tool: "browser_type" } };
+      }
+      await tool(tools, "finish_test").execute({ status: "passed", reason: "Distinct values remained distinct." });
+      yield { event_type: "done", content: null, metadata: null };
+    };
+
+    const result = await runBlopTests({
+      specFiles: [specFile],
+      reportDir: join(temp.dir, ".blop"),
+      agentStream,
+      reporter: "json",
+    });
+
+    expect(result.status).toBe("passed");
+  }, 60_000);
+
   test("still enforces an explicit maxSteps cap", async () => {
     const { temp, server, specFile } = await setup("capped run");
     const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools, signal }) {

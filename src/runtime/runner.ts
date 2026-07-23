@@ -9,8 +9,9 @@ import {
 import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { chromium, firefox, webkit, type Page } from "playwright";
+import type { Browser, Page } from "playwright";
 import { getCiMetadata } from "../node/ci.js";
+import { launchLocalBrowser } from "../node/browser-launcher.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
 import { runBrowserAgentStream } from "./agent-loop.js";
@@ -77,7 +78,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     }
   };
 
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+  let browser: Browser | null = null;
   let containerSession: PlaywrightContainerSession | null = null;
   // Resolved after the browser/container is up. When false, third-party
   // request failures during the run are environment limits (no internet
@@ -197,8 +198,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       // new one so live frames always reflect what the agent is acting on.
       let screencast: Screencast | null = null;
       const liveFramePath = join(screenshotsDir, "live.jpg");
-      const wantStream =
-        options.streamFrames !== false && (options.captureStepScreenshots || Boolean(progressPath));
+      const supportsCdpScreencast = Boolean(options.containerized)
+        || (options.browser ?? "chromium") === "chromium";
+      const wantStream = supportsCdpScreencast
+        && options.streamFrames !== false
+        && (options.captureStepScreenshots || Boolean(progressPath));
       const streamViewport = options.viewport ?? options.browserContext?.viewport ?? undefined;
       const startScreencastFor = async (target: Page) => {
         if (!wantStream) return null;
@@ -515,6 +519,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   };
 
   try {
+    if (options.containerized && options.browser === "camoufox") {
+      throw new Error("Camoufox is a local browser backend and cannot be combined with --containerized.");
+    }
     if (options.containerized) {
       const containerOptions = typeof options.containerized === "object" ? options.containerized : {};
       containerSession = await startPlaywrightContainer(containerOptions);
@@ -522,8 +529,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       hasInternetEgress = containerSession.hasInternetEgress;
       corsBypassed = containerSession.corsBypassed;
     } else {
-      const browserType = { chromium, firefox, webkit }[options.browser ?? "chromium"];
-      browser = await browserType.launch({ headless: !options.headed });
+      browser = await launchLocalBrowser(options);
       // Non-containerized launches run on the host; assume host egress is
       // whatever the host has. We don't probe here to keep startup fast and
       // because a host browser hitting api.web3forms.com failing is a real
@@ -636,7 +642,13 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 }
 
 function actionCycleSignature(action: BlopAction): string {
-  const base = `${action.name}|${JSON.stringify(action.input)}`;
+  const normalizedInput = JSON.stringify(action.input, (key, value: unknown) => {
+    if (key !== "ref" || typeof value !== "string") return value;
+    if (/^s\d+:e\d+$/.test(value)) return value.replace(/^s\d+:/, "s#:");
+    if (/^x\d+$/.test(value)) return "x#";
+    return value;
+  });
+  const base = `${action.name}|${normalizedInput}`;
   if (action.name !== "browser_snapshot") return base;
   try {
     const snapshot = JSON.parse(action.output) as {
@@ -766,9 +778,9 @@ function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgr
     "Rules:",
     `- ${startInstruction}`,
     "- Start by decomposing the goal into critical points: every explicit page, action, assertion, filter, sort, selection, value, or final datum that must be proven.",
-    "- Use browser_snapshot before important actions; it includes visible text plus ARIA roles/labels. Prefer role, label, placeholder, test id, or text targets over brittle CSS.",
-    "- ARIA snapshot lines describe elements; they are not selectors. Convert `button \"Save\"` to target { role: \"button\", name: \"Save\" }, and `textbox \"Location\"` to { role: \"textbox\", name: \"Location\" }. Never paste the whole ARIA line into a target string.",
-    "- Use record_critical_point for each requirement. Mark a point passed only when a deterministic assertion, URL, visible text, screenshot, or action output proves it.",
+    "- Use browser_snapshot before important actions. Prefer a current opaque { ref: \"e1\" } or { ref: \"x1\" } from semanticSnapshot/actionTargets, copy it verbatim, and take a fresh snapshot after navigation. Use role, label, placeholder, test id, or text only when no current ref is available.",
+    "- Snapshot lines describe elements; they are not selector strings. When a ref is unavailable, copy the exact observed role/name into a structured target such as { role: \"button\", name: \"Save\" }. Never invent a role/name, paste the whole snapshot line into a string, or reuse a pre-navigation ref.",
+    "- Use record_critical_point for each requirement and always include its required id, description, and status fields. Mark a point passed only when a deterministic assertion, URL, visible text, screenshot, or action output proves it.",
     "- Prefer deterministic assertions such as browser_expect_text, browser_expect_url, browser_expect_value, browser_expect_checked, browser_expect_visible, browser_expect_count, and browser_expect_attribute before passing. They auto-retry until timeoutMs (default 5000ms), so do not pad them with manual waits; raise timeoutMs for slow UIs instead.",
     "- For lists, tables, rankings, sorts, and counts, use browser_extract to read the visible data of ALL matching elements in one call, then compare. Never read rows one by one or eyeball order from a screenshot.",
     "- When you can already predict a deterministic sequence (fill, click, assert), batch it with browser_run_steps in one call instead of one call per action. Explore with browser_snapshot first; never batch steps you are unsure about.",
@@ -777,7 +789,7 @@ function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgr
     `- ${popupRules}`,
     ...(corsBypassed ? [corsRule] : []),
     thirdPartyRules,
-    "- Capture screenshots only when they add useful evidence. When one element or region proves the point, pass target to browser_screenshot so the screenshot captures the smallest relevant area; avoid fullPage unless the whole layout is the evidence.",
+    "- Capture screenshots only when they add useful evidence. After navigation, omit target for page-level evidence unless a fresh snapshot exposed a new current-page ref. Never reuse the element ref that initiated navigation; avoid fullPage unless the whole layout is the evidence.",
     "- Do not guess UI state. If selected state is hidden after a drawer, accordion, modal, or dropdown closes, reopen it or capture a visible chip/summary before treating it as verified.",
     "- If a site exposes a dedicated control for a requirement, use that control. A broad search query does not satisfy explicit filters, sorts, styles, attributes, or rankings.",
     "- Ranking words such as cheapest, latest, highest-rated, best-selling, or most reviewed must be grounded in the app's actual sort/filter or visible metric.",
