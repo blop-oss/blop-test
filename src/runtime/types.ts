@@ -124,6 +124,7 @@ export type BlopAction = {
   output: string;
   metadata?: Record<string, unknown>;
   timestamp: string;
+  durationMs: number;
 };
 
 export type BlopScreenshot = {
