@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { stopPlaywrightContainer } from "@blopai/browser-harness";
+import { stopCamoufoxContainer, stopPlaywrightContainer } from "@blopai/browser-harness";
 import { runBlopTests } from "../../src/runtime/runner";
 import type { BlopAgentStreamRunner } from "../../src/runtime/types";
 import { createTempDir, writeSpec } from "../test-utils/files";
@@ -18,9 +18,12 @@ function dockerAvailable(): boolean {
 
 const hasDocker = dockerAvailable();
 const TEST_CONTAINER = "blop-playwright-test-runner";
+const CAMOUFOX_TEST_CONTAINER = "blop-camoufox-test-runner";
 
 afterAll(async () => {
-  if (hasDocker) await stopPlaywrightContainer(TEST_CONTAINER);
+  if (!hasDocker) return;
+  await stopPlaywrightContainer(TEST_CONTAINER);
+  await stopCamoufoxContainer(CAMOUFOX_TEST_CONTAINER);
 });
 
 describe.skipIf(!hasDocker)("containerized runner", () => {
@@ -81,5 +84,54 @@ describe.skipIf(!hasDocker)("containerized runner", () => {
       await temp.cleanup();
     },
     240_000,
+  );
+
+  test(
+    "publishes action screenshots as live preview frames for containerized Camoufox",
+    async () => {
+      const temp = await createTempDir();
+      const specFile = await writeSpec(temp.dir, "camoufox-preview.blop.ts", `
+        import { defineAgentTest } from "${process.cwd()}/src/index.ts";
+        export default defineAgentTest({ name: "camoufox preview", goal: "Verify the preview frame." });
+      `);
+      const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools }) {
+        const tools = nativeTools as Array<{ name: string; execute: (input: Record<string, unknown>) => Promise<unknown> }>;
+        const tool = (name: string) => {
+          const found = tools.find((candidate) => candidate.name === name);
+          if (!found) throw new Error(`Missing tool: ${name}`);
+          return found;
+        };
+        yield { event_type: "step_start", content: "browser_goto", metadata: { tool: "browser_goto" } };
+        await tool("browser_goto").execute({ url: "data:text/html,<title>camoufox</title><h1>Camoufox preview</h1>" });
+        yield { event_type: "step_start", content: "browser_expect_text", metadata: { tool: "browser_expect_text" } };
+        await tool("browser_expect_text").execute({ text: "Camoufox preview" });
+        yield { event_type: "step_start", content: "finish_test", metadata: { tool: "finish_test" } };
+        await tool("finish_test").execute({ status: "passed", reason: "Camoufox rendered the page." });
+        yield { event_type: "done", content: null, metadata: null };
+      };
+
+      const reportDir = join(temp.dir, ".blop");
+      const progressFile = join(temp.dir, "progress.ndjson");
+      const result = await runBlopTests({
+        specFiles: [specFile],
+        reportDir,
+        agentStream,
+        reporter: "json",
+        browser: "camoufox",
+        containerized: { containerName: CAMOUFOX_TEST_CONTAINER },
+        progressFile,
+        captureStepScreenshots: true,
+      });
+
+      expect(result.status).toBe("passed");
+      const progressLines = (await readFile(progressFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      const frame = progressLines.find((line) => line.type === "frame");
+      const liveFramePath = join(reportDir, "screenshots", result.results[0].id, "live.jpg");
+      expect(frame?.path).toBe(liveFramePath);
+      expect((await readFile(liveFramePath)).byteLength).toBeGreaterThan(0);
+
+      await temp.cleanup();
+    },
+    300_000,
   );
 });

@@ -17,6 +17,7 @@ import { launchLocalBrowser } from "../node/browser-launcher.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
 import { runBrowserAgentStream } from "./agent-loop.js";
+import { createStepFramePublisher } from "./live-frame-fallback.js";
 import { loadAgentTests } from "./spec.js";
 import type { BlopAction, BlopAgentEvent, BlopAgentTest, BlopBrowserLog, BlopCriticalPoint, BlopRunOptions, BlopRunResult, BlopScreenshot, BlopTestResult, BlopTestStatus } from "./types.js";
 
@@ -130,6 +131,14 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     let status: BlopTestStatus = "error";
     let reason = "The agent did not finish the test.";
     let attempts = 0;
+    const liveFramePath = join(screenshotsDir, "live.jpg");
+    const stepFramePublisher = progressPath
+      ? createStepFramePublisher({
+          liveFramePath,
+          testName: test.name,
+          onFrame: appendProgress,
+        })
+      : null;
 
     appendProgress({
       type: "test_start",
@@ -191,7 +200,6 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       // active page changes (popup switch), stop the old stream and start a
       // new one so live frames always reflect what the agent is acting on.
       let screencast: Screencast | null = null;
-      const liveFramePath = join(screenshotsDir, "live.jpg");
       const supportsCdpScreencast = browserSupportsCdpScreencast(options);
       const wantStream = supportsCdpScreencast
         && options.streamFrames !== false
@@ -263,6 +271,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
           captureStepScreenshots: options.captureStepScreenshots,
           liveFrame: () => screencast?.latest() ?? null,
           onAction: (action) => {
+            const screenshotPath = screenshotPathFor(action);
             recentActionSignatures.push(actionCycleSignature(action));
             const maxHistory = STALL_MAX_CYCLE_LENGTH * STALL_CYCLE_REPEATS;
             if (recentActionSignatures.length > maxHistory) recentActionSignatures.shift();
@@ -281,9 +290,12 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
               output: action.output,
               error:
                 typeof action.metadata?.error === "string" ? action.metadata.error : null,
-              screenshotPath: screenshotPathFor(action),
+              screenshotPath,
               timestamp: action.timestamp,
             });
+            if (!wantStream && screenshotPath) {
+              stepFramePublisher?.publish(screenshotPath, action.timestamp);
+            }
           },
         });
 
@@ -461,6 +473,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         if (attempt > (options.retries ?? 0)) break;
       } finally {
         if (timeout) clearTimeout(timeout);
+        await stepFramePublisher?.flush();
         try {
           context.off("page", attachPageListeners);
         } catch {

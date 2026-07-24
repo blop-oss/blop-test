@@ -57,6 +57,45 @@ describe("runner with mock agent", () => {
     expect(report.results[0].status).toBe("passed");
   });
 
+  test("publishes action screenshots to the live preview when CDP streaming is inactive", async () => {
+    const temp = await createTempDir();
+    cleanup = temp.cleanup;
+    const server = await startFixtureServer([
+      { path: "/", body: `<main><h1>Fallback preview fixture</h1></main>` },
+    ]);
+    closeServer = server.close;
+    const specFile = await writeSpec(temp.dir, "fallback-preview.blop.ts", `
+      import { defineAgentTest } from "${process.cwd()}/src/index.ts";
+      export default defineAgentTest({ name: "fallback preview", goal: "Verify fixture." });
+    `);
+    const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools }) {
+      const tools = nativeTools as Array<{ name: string; execute: (input: Record<string, unknown>) => Promise<unknown> }>;
+      yield { event_type: "step_start", content: "browser_goto", metadata: { tool: "browser_goto" } };
+      await tool(tools, "browser_goto").execute({ url: server.url });
+      yield { event_type: "step_start", content: "finish_test", metadata: { tool: "finish_test" } };
+      await tool(tools, "finish_test").execute({ status: "passed", reason: "Preview captured." });
+      yield { event_type: "done", content: null, metadata: null };
+    };
+
+    const reportDir = join(temp.dir, ".blop");
+    const progressFile = join(temp.dir, "progress.ndjson");
+    const result = await runBlopTests({
+      specFiles: [specFile],
+      reportDir,
+      progressFile,
+      captureStepScreenshots: true,
+      streamFrames: false,
+      agentStream,
+      reporter: "json",
+    });
+
+    expect(result.status).toBe("passed");
+    const progress = (await readFile(progressFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const liveFramePath = join(reportDir, "screenshots", result.results[0].id, "live.jpg");
+    expect(progress.some((entry) => entry.type === "frame" && entry.path === liveFramePath)).toBe(true);
+    expect((await readFile(liveFramePath)).byteLength).toBeGreaterThan(0);
+  });
+
   test("classifies a stream that errors and dies mid-test as a runtime error, not an app failure", async () => {
     const temp = await createTempDir();
     cleanup = temp.cleanup;
