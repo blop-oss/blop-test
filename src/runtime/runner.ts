@@ -1,7 +1,9 @@
 import {
   createBrowserTools,
+  startCamoufoxContainer,
   startPlaywrightContainer,
   startScreencast,
+  type CamoufoxContainerSession,
   type FinishState,
   type PlaywrightContainerSession,
   type Screencast,
@@ -9,7 +11,7 @@ import {
 import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { Browser, Page } from "playwright";
+import type { Browser, BrowserContextOptions, Page } from "playwright";
 import { getCiMetadata } from "../node/ci.js";
 import { launchLocalBrowser } from "../node/browser-launcher.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
@@ -79,7 +81,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   };
 
   let browser: Browser | null = null;
-  let containerSession: PlaywrightContainerSession | null = null;
+  let containerSession: PlaywrightContainerSession | CamoufoxContainerSession | null = null;
   // Resolved after the browser/container is up. When false, third-party
   // request failures during the run are environment limits (no internet
   // egress from the sandbox), not app bugs — the agent prompt is told so.
@@ -141,15 +143,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       attempts = attempt;
       let context;
       try {
-        context = await browser!.newContext({
-          ...options.browserContext,
-          viewport: options.viewport ?? options.browserContext?.viewport,
-          // Bypass Content-Security-Policy so the agent can drive flows the
-          // app's own CSP would otherwise block in the sandbox (inline event
-          // handlers, eval-based vendor SDKs, etc.). CSP is a delivery-time
-          // defense, not a behavior the agent is testing for.
-          bypassCSP: true,
-        });
+        context = await browser!.newContext(resolveBrowserContextOptions(options));
       } catch (error) {
         status = "error";
         reason = `Failed to create browser context: ${error instanceof Error ? error.message : String(error)}`;
@@ -198,8 +192,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       // new one so live frames always reflect what the agent is acting on.
       let screencast: Screencast | null = null;
       const liveFramePath = join(screenshotsDir, "live.jpg");
-      const supportsCdpScreencast = Boolean(options.containerized)
-        || (options.browser ?? "chromium") === "chromium";
+      const supportsCdpScreencast = browserSupportsCdpScreencast(options);
       const wantStream = supportsCdpScreencast
         && options.streamFrames !== false
         && (options.captureStepScreenshots || Boolean(progressPath));
@@ -519,12 +512,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   };
 
   try {
-    if (options.containerized && options.browser === "camoufox") {
-      throw new Error("Camoufox is a local browser backend and cannot be combined with --containerized.");
-    }
     if (options.containerized) {
       const containerOptions = typeof options.containerized === "object" ? options.containerized : {};
-      containerSession = await startPlaywrightContainer(containerOptions);
+      containerSession = options.browser === "camoufox"
+        ? await startCamoufoxContainer(containerOptions)
+        : await startPlaywrightContainer(containerOptions);
       browser = containerSession.browser as any;
       hasInternetEgress = containerSession.hasInternetEgress;
       corsBypassed = containerSession.corsBypassed;
@@ -639,6 +631,37 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   }
 
   return result;
+}
+
+/**
+ * Build context options for the selected browser backend.
+ *
+ * Camoufox owns its window size through fingerprint generation. Playwright's
+ * viewport emulation sends Chromium-only fields such as `isMobile`, which the
+ * Camoufox Firefox protocol rejects. Keep this aligned with browser-harness's
+ * Camoufox CLI runtime by disabling viewport emulation entirely.
+ */
+export function resolveBrowserContextOptions(
+  options: Pick<BlopRunOptions, "browser" | "browserContext" | "viewport">,
+): BrowserContextOptions {
+  return {
+    ...options.browserContext,
+    viewport: options.browser === "camoufox"
+      ? null
+      : options.viewport ?? options.browserContext?.viewport,
+    // Bypass Content-Security-Policy so the agent can drive flows the app's
+    // own CSP would otherwise block in the sandbox (inline event handlers,
+    // eval-based vendor SDKs, etc.). CSP is a delivery-time defense, not a
+    // behavior the agent is testing for.
+    bypassCSP: true,
+  };
+}
+
+/** Camoufox remains Firefox-based even when reached through a container. */
+export function browserSupportsCdpScreencast(
+  options: Pick<BlopRunOptions, "browser" | "containerized">,
+): boolean {
+  return (options.browser ?? "chromium") === "chromium";
 }
 
 function actionCycleSignature(action: BlopAction): string {
