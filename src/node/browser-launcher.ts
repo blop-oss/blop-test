@@ -48,7 +48,7 @@ export async function launchLocalBrowser(
     throw new Error(
       `Failed to launch Camoufox: ${message}\n\n` +
       "Camoufox requires Node.js 22 or newer and a downloaded browser binary. " +
-      "Install `camoufox-js@0.11.1` and `playwright-core@1.59.1`, then run " +
+      "Install `camoufox-js@0.11.1` and `playwright-core@1.61.1`, then run " +
       "`pnpm exec camoufox-js fetch`.",
     );
   }
