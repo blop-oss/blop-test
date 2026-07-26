@@ -9,7 +9,13 @@ import { createTempDir, writeSpec } from "../test-utils/files";
 
 function dockerAvailable(): boolean {
   try {
-    execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], { stdio: "pipe" });
+    // The timeout matters: when the Docker CLI is installed but the daemon is
+    // down, `docker version` blocks on the socket rather than failing, which
+    // would hang this file at import and never reach the skipIf below.
+    execFileSync("docker", ["version", "--format", "{{.Server.Version}}"], {
+      stdio: "pipe",
+      timeout: 5000,
+    });
     return true;
   } catch {
     return false;
