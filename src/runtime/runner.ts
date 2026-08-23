@@ -10,12 +10,14 @@ import {
 } from "@blopai/browser-harness";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { Browser, BrowserContextOptions, Page } from "playwright";
 import { getCiMetadata } from "../node/ci.js";
+import { resolveOtelConfig } from "../node/otel-config.js";
 import { launchLocalBrowser } from "../node/browser-launcher.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
+import { startOtelRun, type BlopOtelRunSpan, type BlopOtelScenarioSpan } from "../reporters/otel.js";
 import { runBrowserAgentStream } from "./agent-loop.js";
 import { createStepFramePublisher } from "./live-frame-fallback.js";
 import { loadAgentTests } from "./spec.js";
@@ -61,6 +63,28 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   const hasLiveAgent = !options.agentStream;
   let runError: string | null = null;
 
+  // Telemetry is opt-in and must never be able to fail a run: with no
+  // collector configured the OTel SDK is never constructed, and any error
+  // setting it up is reported and swallowed.
+  let otelRun: BlopOtelRunSpan | null = null;
+  try {
+    const otelConfig = resolveOtelConfig(options);
+    if (otelConfig) {
+      otelRun = startOtelRun(otelConfig, {
+        runId,
+        suiteName: suiteNameFor(specFiles),
+        startedAt,
+        ci: getCiMetadata(),
+        provider: options.provider ?? process.env.BLOP_AGENT_PROVIDER ?? null,
+        model: options.model ?? process.env.BLOP_AGENT_MODEL ?? null,
+      });
+    }
+  } catch (error) {
+    console.error(
+      `Failed to start OpenTelemetry export: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   // Live progress sink. When a host (e.g. the web app) passes progressFile, we
   // append one NDJSON line per lifecycle event so it can tail agent activity
   // while the run is still in flight instead of waiting for the final report.
@@ -95,15 +119,23 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   const runOneTest = async (test: BlopAgentTest): Promise<BlopTestResult> => {
     const testId = createId("test");
     const screenshotsDir = join(reportDir, "screenshots", testId);
+    const otelScenario: BlopOtelScenarioSpan | null =
+      otelRun?.startScenario({
+        name: test.name,
+        specFile: scenarioPathFor(test.specFile, options.cwd),
+        baseUrl: test.baseUrl ?? options.baseUrl ?? null,
+      }) ?? null;
     try {
       await mkdir(screenshotsDir, { recursive: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const reason = `Failed to create screenshots directory: ${message}`;
+      otelScenario?.end({ status: "error", reason, attempts: 0 });
       return {
         id: testId,
         name: test.name,
         status: "error",
-        reason: `Failed to create screenshots directory: ${message}`,
+        reason,
         startedAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
         durationMs: 0,
@@ -150,6 +182,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 
     for (let attempt = 1; attempt <= (options.retries ?? 0) + 1; attempt += 1) {
       attempts = attempt;
+      otelScenario?.beginAttempt(attempt);
       let context;
       try {
         context = await browser!.newContext(resolveBrowserContextOptions(options));
@@ -271,6 +304,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
           captureStepScreenshots: options.captureStepScreenshots,
           liveFrame: () => screencast?.latest() ?? null,
           onAction: (action) => {
+            otelScenario?.recordStep(action);
             const screenshotPath = screenshotPathFor(action);
             recentActionSignatures.push(actionCycleSignature(action));
             const maxHistory = STALL_MAX_CYCLE_LENGTH * STALL_CYCLE_REPEATS;
@@ -381,6 +415,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             resumes < MAX_AGENT_RESUMES
           ) {
             resumes += 1;
+            otelScenario?.recordResume(resumes, MAX_AGENT_RESUMES);
             if (options.verbose) {
               console.error(
                 `  [resume ${resumes}/${MAX_AGENT_RESUMES}] agent session ended without finish_test; resuming with progress so far`,
@@ -495,6 +530,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     }
 
     const testFinishedAt = new Date();
+    otelScenario?.end({ status, reason, attempts });
     appendProgress({
       type: "test_finish",
       test: test.name,
@@ -545,14 +581,24 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       for (const specFile of specFiles) {
         let tests;
         try {
-          tests = await loadAgentTests(specFile);
+          // Stamp the source file onto each test so scenario spans can carry
+          // blop.scenario.path; the spec schema strips unknown keys, so this
+          // has to happen after loading.
+          tests = (await loadAgentTests(specFile)).map((test) => ({ ...test, specFile }));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
+          const reason = `Failed to load spec file: ${message}`;
+          otelRun
+            ?.startScenario({
+              name: `(load error: ${specFile})`,
+              specFile: scenarioPathFor(specFile, options.cwd),
+            })
+            .end({ status: "error", reason, attempts: 0 });
           results.push({
             id: createId("test"),
             name: `(load error: ${specFile})`,
             status: "error",
-            reason: `Failed to load spec file: ${message}`,
+            reason,
             startedAt: new Date().toISOString(),
             finishedAt: new Date().toISOString(),
             durationMs: 0,
@@ -643,7 +689,40 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     console.error(`Failed to upload results to platform: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // Must complete here: the CLI calls process.exit immediately after printing
+  // its summary, which would drop anything still buffered.
+  try {
+    await otelRun?.end({ status, finishedAt });
+  } catch (error) {
+    console.error(
+      `Failed to finish OpenTelemetry export: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   return result;
+}
+
+/**
+ * Report the spec path relative to the working directory. Absolute paths leak
+ * the runner's home directory to the collector and are useless for grouping,
+ * since they differ between a laptop and a CI worker.
+ */
+export function scenarioPathFor(specFile: string | undefined, cwd?: string): string | undefined {
+  if (!specFile) return undefined;
+
+  const relativePath = relative(cwd ?? process.cwd(), specFile);
+  return relativePath && !relativePath.startsWith("..") ? relativePath : specFile;
+}
+
+/** Human label for the run span: one spec file reads better than a count. */
+export function suiteNameFor(specFiles: string[]): string {
+  if (specFiles.length === 1) {
+    const file = specFiles[0]!.split(/[\\/]/).pop() ?? specFiles[0]!;
+    // Mirrors the spec-file detection pattern: .blop.{ts,tsx,mts,cts,js,...}
+    return file.replace(/\.blop\.[cm]?[tj]sx?$/, "");
+  }
+
+  return `${specFiles.length} spec files`;
 }
 
 /**
