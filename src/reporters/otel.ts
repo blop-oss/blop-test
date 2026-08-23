@@ -101,9 +101,12 @@ export type BlopOtelScenarioSpan = {
   /** Reconcile the harness's post-completion record with the live span. */
   recordStep(action: BlopAction): void;
   recordResume(resume: number, max: number): void;
+  /** Reset per-call token accounting. Usage totals are cumulative per call. */
+  beginLlmCall(): void;
   recordTokens(usage: Record<string, unknown>): void;
   /** The context a `traceparent` should reference right now. */
   activeContext(): Context;
+  /** Idempotent: the runner also closes the scenario from a finally block. */
   end(input: {
     status: BlopTestStatus;
     reason: string;
@@ -132,10 +135,11 @@ export type BlopOtelRunInput = {
   projectId?: string | null;
 };
 
+/** Absent when no metrics endpoint resolved; call sites guard with `?.`. */
 type Instruments = {
-  scenarioDuration: Histogram;
-  recoveries: Counter;
-  tokens: Counter;
+  scenarioDuration?: Histogram;
+  recoveries?: Counter;
+  tokens?: Counter;
 };
 
 export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): BlopOtelRunSpan {
@@ -158,12 +162,12 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
     ],
   });
 
-  const meterProvider = new MeterProvider({
+  const meterProvider = config.metricsUrl === null ? null : new MeterProvider({
     resource,
     readers: [
       new PeriodicExportingMetricReader({
         exporter: new OTLPMetricExporter({
-          url: config.metricsUrl,
+          url: config.metricsUrl ?? undefined,
           headers: config.metricsHeaders,
           timeoutMillis: EXPORT_TIMEOUT_MS,
           // A CLI run is a short-lived process. Cumulative temporality would
@@ -179,12 +183,12 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
     ],
   });
 
-  const loggerProvider = new LoggerProvider({
+  const loggerProvider = config.logsUrl === null ? null : new LoggerProvider({
     resource,
     processors: [
       new BatchLogRecordProcessor({
         exporter: new OTLPLogExporter({
-          url: config.logsUrl,
+          url: config.logsUrl ?? undefined,
           headers: config.logsHeaders,
           timeoutMillis: EXPORT_TIMEOUT_MS,
         }),
@@ -197,20 +201,19 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
   // one event loop under --workers, so every parent context is threaded
   // explicitly and an ambient active-span stack would cross-link them.
   const tracer = tracerProvider.getTracer(TRACER_NAME);
-  const logger = loggerProvider.getLogger(TRACER_NAME);
-  const meter = meterProvider.getMeter(TRACER_NAME);
+  const meter = meterProvider?.getMeter(TRACER_NAME);
 
   const instruments: Instruments = {
-    scenarioDuration: meter.createHistogram("blop.scenario.duration", {
+    scenarioDuration: meter?.createHistogram("blop.scenario.duration", {
       description: "How long a scenario took, including retries.",
       // Semantic conventions require seconds for duration instruments.
       unit: "s",
     }),
-    recoveries: meter.createCounter("blop.agent.recoveries", {
+    recoveries: meter?.createCounter("blop.agent.recoveries", {
       description: "Times the runner recovered a scenario by resuming the agent or retrying it.",
       unit: "{recovery}",
     }),
-    tokens: meter.createCounter("blop.agent.tokens", {
+    tokens: meter?.createCounter("blop.agent.tokens", {
       description: "Model tokens consumed while running scenarios.",
       unit: "{token}",
     }),
@@ -232,17 +235,34 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
   );
   const runContext = trace.setSpan(ROOT_CONTEXT, runSpan);
 
-  const cloudEvent = createCloudEventEmitter(logger, input);
+  const logger = loggerProvider?.getLogger(TRACER_NAME);
+  const cloudEvent: CloudEventEmitter = logger
+    ? createCloudEventEmitter(logger, input)
+    : () => {};
+
+  // A scenario can be abandoned if the runner throws outside a guarded region
+  // (creating a page, starting the screencast). An unended span is never
+  // exported, which would lose the trace for exactly the failures worth
+  // seeing, so the run closes anything still open.
+  const openScenarios = new Set<{ abandon: () => void }>();
   cloudEvent("qa.run.started.v1", runContext, {
     run_id: input.runId,
     ...(input.projectId ? { project_id: input.projectId } : {}),
   });
 
   return {
-    startScenario: (scenario) =>
-      startScenario({ tracer, runContext, instruments, cloudEvent, input, scenario }),
+    startScenario: (scenario) => {
+      const started = startScenario({ tracer, runContext, instruments, cloudEvent, input, scenario });
+      const entry = { abandon: started.abandon };
+      openScenarios.add(entry);
+      started.onEnd(() => openScenarios.delete(entry));
+      return started.span;
+    },
 
     end: async ({ status, finishedAt, durationMs }) => {
+      for (const scenario of [...openScenarios]) scenario.abandon();
+      openScenarios.clear();
+
       runSpan.setAttribute(ATTR_TEST_SUITE_RUN_STATUS, suiteRunStatus(status));
       if (input.ci.provider) {
         runSpan.setAttribute(ATTR_CICD_PIPELINE_RESULT, pipelineResult(status));
@@ -316,7 +336,7 @@ function startScenario(args: {
   cloudEvent: CloudEventEmitter;
   input: BlopOtelRunInput;
   scenario: { name: string; specFile?: string; baseUrl?: string | null };
-}): BlopOtelScenarioSpan {
+}): { span: BlopOtelScenarioSpan; abandon: () => void; onEnd: (fn: () => void) => void } {
   const { tracer, runContext, instruments, cloudEvent, input, scenario } = args;
   const journey = journeyId(scenario.name);
 
@@ -343,7 +363,11 @@ function startScenario(args: {
   // The live span for the tool currently executing. Inner steps of a batching
   // tool arrive while it is open and nest under it.
   let openStep: { span: Span; context: Context; name: string; consumed: boolean } | null = null;
+  let ended = false;
+  // Token totals already counted for the LLM call in flight.
+  let countedTokens: Record<string, number> = {};
 
+  let onEnded: () => void = () => {};
   const host = () => attemptSpan ?? scenarioSpan;
   const hostContext = () => openStep?.context ?? attemptContext;
 
@@ -354,12 +378,12 @@ function startScenario(args: {
     attemptContext = scenarioContext;
   };
 
-  return {
+  const span: BlopOtelScenarioSpan = {
     beginAttempt(attempt) {
       closeAttempt();
       if (attempt < 2) return;
 
-      instruments.recoveries.add(1, {
+      instruments.recoveries?.add(1, {
         [ATTR_BLOP_JOURNEY_ID]: journey,
         [ATTR_BLOP_RECOVERY_KIND]: "retry",
       });
@@ -432,7 +456,7 @@ function startScenario(args: {
     },
 
     recordResume(resume, max) {
-      instruments.recoveries.add(1, {
+      instruments.recoveries?.add(1, {
         [ATTR_BLOP_JOURNEY_ID]: journey,
         [ATTR_BLOP_RECOVERY_KIND]: "resume",
       });
@@ -444,12 +468,25 @@ function startScenario(args: {
       });
     },
 
+    beginLlmCall() {
+      countedTokens = {};
+    },
+
     recordTokens(usage) {
       for (const kind of ["input", "output", "cache_read", "cache_write"] as const) {
-        const value = usage[kind];
-        if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) continue;
+        const total = usage[kind];
+        if (typeof total !== "number" || !Number.isFinite(total) || total < 0) continue;
 
-        instruments.tokens.add(value, {
+        // prompt_tokens and completion_tokens are running totals for the whole
+        // request, and the agent loop re-emits a usage event for every chunk
+        // that carries one. Adding each event would multiply the count by the
+        // number of chunks, so only the increase since the last one is counted.
+        const already = countedTokens[kind] ?? 0;
+        const delta = total - already;
+        countedTokens[kind] = Math.max(total, already);
+        if (delta <= 0) continue;
+
+        instruments.tokens?.add(delta, {
           [ATTR_BLOP_JOURNEY_ID]: journey,
           [ATTR_BLOP_TOKEN_KIND]: kind,
           ...(input.team ? { [ATTR_BLOP_TEAM]: input.team } : {}),
@@ -460,6 +497,9 @@ function startScenario(args: {
     activeContext: () => hostContext(),
 
     end({ status, reason, attempts, durationMs }) {
+      if (ended) return;
+      ended = true;
+
       const finishedAt = new Date();
       if (openStep) {
         openStep.span.end();
@@ -481,7 +521,7 @@ function startScenario(args: {
       // Seconds, per the metric semantic conventions. The histogram's own count
       // already gives scenario results per journey and status, so a separate
       // results counter would be pure duplication.
-      instruments.scenarioDuration.record(durationMs / 1000, {
+      instruments.scenarioDuration?.record(durationMs / 1000, {
         [ATTR_BLOP_JOURNEY_ID]: journey,
         [ATTR_TEST_CASE_RESULT_STATUS]: resultStatus,
         ...(category ? { [ATTR_BLOP_FAILURE_CATEGORY]: category } : {}),
@@ -496,33 +536,70 @@ function startScenario(args: {
       });
 
       scenarioSpan.end(finishedAt);
+      onEnded();
+    },
+  };
+
+  /**
+   * Close a scenario the runner never finished. Deliberately silent on metrics
+   * and events: an abandoned scenario has no meaningful duration, and a
+   * zero-second data point would skew the histogram.
+   */
+  const abandon = () => {
+    if (ended) return;
+    ended = true;
+
+    const finishedAt = new Date();
+    openStep?.span.end(finishedAt);
+    openStep = null;
+    closeAttempt(finishedAt);
+
+    scenarioSpan.setAttribute(ATTR_TEST_CASE_RESULT_STATUS, TEST_CASE_RESULT_STATUS_VALUE_FAIL);
+    scenarioSpan.setAttribute(ATTR_BLOP_FAILURE_CATEGORY, "abandoned");
+    scenarioSpan.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: "The run ended before this scenario finished.",
+    });
+    scenarioSpan.end(finishedAt);
+    onEnded();
+  };
+
+  return {
+    span,
+    abandon,
+    onEnd: (fn) => {
+      onEnded = fn;
     },
   };
 }
 
 async function shutdown(
   tracerProvider: NodeTracerProvider,
-  meterProvider: MeterProvider,
-  loggerProvider: LoggerProvider,
+  meterProvider: MeterProvider | null,
+  loggerProvider: LoggerProvider | null,
 ): Promise<void> {
-  const signals = ["traces", "metrics", "logs"] as const;
+  const providers: Array<[string, { forceFlush(): Promise<void>; shutdown(): Promise<void> }]> = [
+    ["traces", tracerProvider],
+    ...(meterProvider ? [["metrics", meterProvider] as [string, MeterProvider]] : []),
+    ...(loggerProvider ? [["logs", loggerProvider] as [string, LoggerProvider]] : []),
+  ];
 
   // One shared budget, flushed concurrently. A per-signal timeout would let an
-  // unreachable collector stall shutdown for three times as long.
+  // unreachable collector stall shutdown once per signal.
   const flushed = await settleWithin(
-    [tracerProvider.forceFlush(), meterProvider.forceFlush(), loggerProvider.forceFlush()],
+    providers.map(([, provider]) => provider.forceFlush()),
     FLUSH_TIMEOUT_MS,
   );
 
   flushed.forEach((outcome, index) => {
     if (outcome.status === "rejected") {
-      warn(`Failed to flush OpenTelemetry ${signals[index]}: ${message(outcome.reason)}`);
+      warn(`Failed to flush OpenTelemetry ${providers[index]![0]}: ${message(outcome.reason)}`);
     }
   });
 
-  // Already-reported failures; shutdown is just releasing timers and sockets.
+  // Failures are already reported; shutdown just releases timers and sockets.
   await settleWithin(
-    [tracerProvider.shutdown(), meterProvider.shutdown(), loggerProvider.shutdown()],
+    providers.map(([, provider]) => provider.shutdown()),
     SHUTDOWN_TIMEOUT_MS,
   );
 }

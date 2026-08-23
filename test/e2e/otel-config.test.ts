@@ -166,6 +166,51 @@ describe("otel config", () => {
     expect(config?.serviceName).toBe("storefront-qa");
   });
 
+  test("leaves a signal unconfigured rather than defaulting it to localhost", () => {
+    // Only a traces endpoint: metrics and logs have nowhere to go. The OTLP
+    // default is localhost:4318, which would quietly post a customer's
+    // telemetry into the void and log ECONNREFUSED on every run.
+    const config = resolveOtelConfig(
+      {},
+      { OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://collector:4318/v1/traces" },
+    );
+
+    expect(config?.tracesUrl).toBe("http://collector:4318/v1/traces");
+    expect(config?.metricsUrl).toBeNull();
+    expect(config?.logsUrl).toBeNull();
+  });
+
+  test("does not stack signal paths when the endpoint already carries one", () => {
+    const config = resolveOtelConfig({ otelEndpoint: "http://collector:4318/v1/traces" }, {});
+
+    expect(config?.tracesUrl).toBe("http://collector:4318/v1/traces");
+    expect(config?.metricsUrl).toBe("http://collector:4318/v1/metrics");
+    expect(config?.logsUrl).toBe("http://collector:4318/v1/logs");
+  });
+
+  test("normalises an allowlist however it was supplied", () => {
+    // The CLI path normalises on the way in; a blop.config.ts value did not,
+    // so odd casing silently matched nothing.
+    const config = resolveOtelConfig(
+      { otelPropagateAllowlist: [" Staging.Example.com ", "", "API.example.com"] },
+      { OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318" },
+    );
+
+    expect(config?.propagateAllowlist).toEqual(["staging.example.com", "api.example.com"]);
+  });
+
+  test("an empty allowlist falls through instead of disabling propagation", () => {
+    const config = resolveOtelConfig(
+      { otelPropagateAllowlist: [] },
+      {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318",
+        BLOP_OTEL_PROPAGATE_ALLOWLIST: "staging.example.com",
+      },
+    );
+
+    expect(config?.propagateAllowlist).toEqual(["staging.example.com"]);
+  });
+
   test("parses host lists", () => {
     expect(parseHostList("a.com,b.com")).toEqual(["a.com", "b.com"]);
     expect(parseHostList(" A.com , ,b.com ")).toEqual(["a.com", "b.com"]);

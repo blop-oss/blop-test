@@ -632,6 +632,91 @@ describe("otel export", () => {
     expect(attr({ attributes: body }, "project_id")).toBe("proj_123");
   });
 
+  test("still exports a scenario the runner abandoned mid-flight", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    // The runner can throw outside a guarded region (creating a page, starting
+    // the screencast) and never reach scenario.end. An unended span is never
+    // exported, losing the trace for exactly the failure worth seeing.
+    const scenario = run.startScenario({ name: "checkout > abandoned" });
+    scenario.beginStep("browser_goto", {});
+
+    await run.end({ status: "error", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    const spans = collector.spans();
+    const scenarioSpan = byName(spans, "checkout > abandoned");
+    expect(scenarioSpan).toBeDefined();
+    expect(scenarioSpan!.status?.code).toBe(STATUS_CODE_ERROR);
+    expect(attr(scenarioSpan, "blop.failure.category")).toBe("abandoned");
+    // The open step span is closed too, rather than dropped.
+    expect(byName(spans, "browser_goto")).toBeDefined();
+
+    // No duration is known, so nothing is recorded that would skew the histogram.
+    const duration = collector.metrics().find((metric) => metric.name === "blop.scenario.duration");
+    expect(points(duration)).toHaveLength(0);
+  });
+
+  test("counts cumulative usage totals once, not once per streamed chunk", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    const scenario = run.startScenario({ name: "checkout > tokens" });
+
+    // prompt_tokens/completion_tokens are running totals for the request, and
+    // the agent loop re-emits a usage event for every chunk carrying one.
+    scenario.beginLlmCall();
+    scenario.recordTokens({ input: 100, output: 10, cache_read: 0, cache_write: 0 });
+    scenario.recordTokens({ input: 100, output: 25, cache_read: 0, cache_write: 0 });
+    scenario.recordTokens({ input: 100, output: 40, cache_read: 0, cache_write: 0 });
+
+    // A second call starts its own totals.
+    scenario.beginLlmCall();
+    scenario.recordTokens({ input: 50, output: 5, cache_read: 0, cache_write: 0 });
+
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    const tokens = collector.metrics().find((metric) => metric.name === "blop.agent.tokens");
+    const byKind = Object.fromEntries(
+      points(tokens).map((point) => [attr(point, "blop.token.kind"), Number(point.asInt ?? point.asDouble)]),
+    );
+
+    // 100 + 50, not 100 + 100 + 100 + 50.
+    expect(byKind.input).toBe(150);
+    // 40 + 5, not 10 + 25 + 40 + 5.
+    expect(byKind.output).toBe(45);
+  });
+
+  test("exports no metrics or logs when only a traces endpoint is configured", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config({ metricsUrl: null, logsUrl: null }), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    const scenario = run.startScenario({ name: "checkout > traces only" });
+    scenario.recordTokens({ input: 10, output: 5 });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    expect(collector.spans().length).toBeGreaterThan(0);
+    expect(collector.metrics()).toHaveLength(0);
+    expect(collector.logRecords()).toHaveLength(0);
+  });
+
   test("an unreachable collector never fails the run", async () => {
     const run = startOtelRun(
       {
@@ -698,5 +783,19 @@ describe("otel helpers", () => {
     expect(failureCategory("error", "Failed to load spec file: boom")).toBe("infrastructure");
     expect(failureCategory("failed", "Expected the total to be 90.")).toBe("assertion");
     expect(failureCategory("error", "Something else entirely")).toBe("error");
+  });
+});
+
+describe("module graph", () => {
+  test("the runner does not statically import the OpenTelemetry SDK", async () => {
+    // The docs promise the SDK is never loaded without a configured endpoint,
+    // and a static import would also drag it into every consumer of the
+    // package, including `await import("@blopai/cli")` in the web app.
+    const source = await Bun.file(new URL("../../src/runtime/runner.ts", import.meta.url)).text();
+
+    const staticOtelImport = /^import\s+(?!type\b)[^;]*from\s+["'][^"']*(?:@opentelemetry|reporters\/otel)/m;
+    expect(staticOtelImport.test(source)).toBe(false);
+    // It is still reachable, just lazily.
+    expect(source).toContain('await import("../reporters/otel.js")');
   });
 });

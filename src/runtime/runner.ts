@@ -17,8 +17,7 @@ import { resolveOtelConfig } from "../node/otel-config.js";
 import { launchLocalBrowser } from "../node/browser-launcher.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
-import { startOtelRun, type BlopOtelRunSpan, type BlopOtelScenarioSpan } from "../reporters/otel.js";
-import { installTraceparentPropagation } from "./otel-propagation.js";
+import type { BlopOtelRunSpan, BlopOtelScenarioSpan } from "../reporters/otel.js";
 import { runBrowserAgentStream } from "./agent-loop.js";
 import { createStepFramePublisher } from "./live-frame-fallback.js";
 import { loadAgentTests } from "./spec.js";
@@ -72,6 +71,10 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   try {
     otelConfig = resolveOtelConfig(options);
     if (otelConfig) {
+      // Loaded here, not at module scope: with no collector configured the
+      // OpenTelemetry SDK is never even parsed, which is what the docs promise
+      // and what keeps it out of every other consumer of this package.
+      const { startOtelRun } = await import("../reporters/otel.js");
       otelRun = startOtelRun(otelConfig, {
         runId,
         suiteName: suiteNameFor(specFiles),
@@ -208,6 +211,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       // Registering on the context (before any page exists) covers popups too.
       if (otelScenario && otelConfig?.propagateToApp) {
         try {
+          const { installTraceparentPropagation } = await import("./otel-propagation.js");
           await installTraceparentPropagation(context, {
             getContext: () => otelScenario.activeContext(),
             allowlist: otelConfig.propagateAllowlist,
@@ -407,6 +411,12 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 
             if (event.event_type === "error" && event.content) {
               lastAgentError = event.content;
+            }
+
+            // Usage totals are cumulative per LLM call, so accounting resets
+            // when a new call starts.
+            if (event.event_type === "llm_call_start") {
+              otelScenario?.beginLlmCall();
             }
 
             if (event.event_type === "usage" && event.metadata) {

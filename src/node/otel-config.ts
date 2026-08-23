@@ -11,8 +11,13 @@ import type { BlopRunOptions } from "../runtime/types.js";
 export type BlopOtelConfig = {
   /** Full OTLP/HTTP traces URL, e.g. http://collector:4318/v1/traces */
   tracesUrl: string;
-  metricsUrl: string;
-  logsUrl: string;
+  /**
+   * Null when no endpoint resolves for the signal. The OTLP default would be
+   * localhost:4318, so exporting anyway would quietly post a customer's
+   * telemetry into the void and log a connection error on every run.
+   */
+  metricsUrl: string | null;
+  logsUrl: string | null;
   /** Headers for the traces signal (generic + traces-specific + options). */
   headers: Record<string, string>;
   metricsHeaders: Record<string, string>;
@@ -55,8 +60,8 @@ export function resolveOtelConfig(
 
   return {
     tracesUrl,
-    metricsUrl: resolveSignalUrl("metrics", options, env)!,
-    logsUrl: resolveSignalUrl("logs", options, env)!,
+    metricsUrl: resolveSignalUrl("metrics", options, env),
+    logsUrl: resolveSignalUrl("logs", options, env),
     headers: signalHeaders("traces", options, env),
     metricsHeaders: signalHeaders("metrics", options, env),
     logsHeaders: signalHeaders("logs", options, env),
@@ -71,8 +76,16 @@ export function resolveOtelConfig(
       trimmed(options.otelEnvironment) ??
       resourceAttribute(env.OTEL_RESOURCE_ATTRIBUTES, "deployment.environment.name"),
     propagateToApp: options.otelPropagateToApp ?? parseBoolean(env.BLOP_OTEL_PROPAGATE_TO_APP),
+    // Normalised whatever the source, so a host written as "Staging.Example.com"
+    // in blop.config.ts still matches: shouldPropagateTo lowercases the request
+    // hostname but compares against these entries verbatim. An empty list is
+    // indistinguishable from "unset" (both propagate to nothing), so it falls
+    // through to the next source rather than silently winning.
     propagateAllowlist:
-      options.otelPropagateAllowlist ?? parseHostList(env.BLOP_OTEL_PROPAGATE_ALLOWLIST),
+      firstNonEmpty(
+        normalizeHosts(options.otelPropagateAllowlist),
+        parseHostList(env.BLOP_OTEL_PROPAGATE_ALLOWLIST),
+      ),
   };
 }
 
@@ -99,10 +112,21 @@ function resolveSignalUrl(
   return null;
 }
 
+/**
+ * Strip a trailing signal path before appending this signal's own. Only
+ * checking the target signal's path would turn a traces-shaped base into
+ * `/v1/traces/v1/metrics`.
+ */
 function appendSignalPath(endpoint: string, signal: Signal): string {
-  const path = SIGNAL_PATHS[signal];
-  const base = endpoint.replace(/\/+$/, "");
-  return base.endsWith(path) ? base : `${base}${path}`;
+  let base = endpoint.replace(/\/+$/, "");
+  for (const path of Object.values(SIGNAL_PATHS)) {
+    if (base.endsWith(path)) {
+      base = base.slice(0, -path.length);
+      break;
+    }
+  }
+
+  return `${base}${SIGNAL_PATHS[signal]}`;
 }
 
 /** Generic headers, then the signal-specific ones, then explicit options. */
@@ -147,12 +171,15 @@ export function resourceAttribute(raw: string | undefined, key: string): string 
 }
 
 export function parseHostList(raw: string | undefined): string[] {
-  if (!raw) return [];
+  return normalizeHosts(raw?.split(","));
+}
 
-  return raw
-    .split(",")
-    .map((host) => host.trim().toLowerCase())
-    .filter(Boolean);
+function firstNonEmpty(...lists: string[][]): string[] {
+  return lists.find((list) => list.length > 0) ?? [];
+}
+
+export function normalizeHosts(hosts: string[] | undefined): string[] {
+  return (hosts ?? []).map((host) => host.trim().toLowerCase()).filter(Boolean);
 }
 
 function parseBoolean(raw: string | undefined): boolean {
