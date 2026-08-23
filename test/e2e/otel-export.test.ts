@@ -74,6 +74,8 @@ function action(name: string, overrides: Partial<BlopAction> = {}): BlopAction {
 
 async function startCollector() {
   const payloads: string[] = [];
+  const metricPayloads: string[] = [];
+  const logPayloads: string[] = [];
   const server = await startFixtureServer([
     {
       path: "/v1/traces",
@@ -83,14 +85,36 @@ async function startCollector() {
         payloads.push(body);
       },
     },
+    {
+      path: "/v1/metrics",
+      body: "{}",
+      contentType: "application/json",
+      onRequest: (_request, body) => {
+        metricPayloads.push(body);
+      },
+    },
+    {
+      path: "/v1/logs",
+      body: "{}",
+      contentType: "application/json",
+      onRequest: (_request, body) => {
+        logPayloads.push(body);
+      },
+    },
   ]);
   closeServer = server.close;
 
   return {
     url: server.url,
+    metrics: () => metricPayloads.flatMap(collectMetrics),
+    logRecords: () => logPayloads.flatMap(collectLogs),
     config: (overrides: Partial<BlopOtelConfig> = {}): BlopOtelConfig => ({
       tracesUrl: `${server.url}/v1/traces`,
+      metricsUrl: `${server.url}/v1/metrics`,
+      logsUrl: `${server.url}/v1/logs`,
       headers: {},
+      metricsHeaders: {},
+      logsHeaders: {},
       serviceName: "blop-runner",
       propagateToApp: false,
       propagateAllowlist: [],
@@ -114,6 +138,48 @@ function collectSpans(payload: string): OtlpSpan[] {
   return (parsed.resourceSpans ?? []).flatMap((resource) =>
     (resource.scopeSpans ?? []).flatMap((scope) => scope.spans ?? []),
   );
+}
+
+type OtlpMetric = {
+  name: string;
+  unit?: string;
+  sum?: { aggregationTemporality?: number; dataPoints?: OtlpPoint[] };
+  histogram?: { aggregationTemporality?: number; dataPoints?: OtlpPoint[] };
+};
+type OtlpPoint = {
+  attributes?: Array<{ key: string; value: OtlpValue }>;
+  asInt?: string;
+  asDouble?: number;
+  count?: string;
+  sum?: number;
+};
+type OtlpLog = {
+  body?: OtlpValue & { kvlistValue?: { values: Array<{ key: string; value: OtlpValue }> } };
+  traceId?: string;
+  spanId?: string;
+  attributes?: Array<{ key: string; value: OtlpValue }>;
+};
+
+function collectMetrics(payload: string): OtlpMetric[] {
+  const parsed = JSON.parse(payload) as {
+    resourceMetrics?: Array<{ scopeMetrics?: Array<{ metrics?: OtlpMetric[] }> }>;
+  };
+  return (parsed.resourceMetrics ?? []).flatMap((resource) =>
+    (resource.scopeMetrics ?? []).flatMap((scope) => scope.metrics ?? []),
+  );
+}
+
+function collectLogs(payload: string): OtlpLog[] {
+  const parsed = JSON.parse(payload) as {
+    resourceLogs?: Array<{ scopeLogs?: Array<{ logRecords?: OtlpLog[] }> }>;
+  };
+  return (parsed.resourceLogs ?? []).flatMap((resource) =>
+    (resource.scopeLogs ?? []).flatMap((scope) => scope.logRecords ?? []),
+  );
+}
+
+function points(metric: OtlpMetric | undefined): OtlpPoint[] {
+  return metric?.sum?.dataPoints ?? metric?.histogram?.dataPoints ?? [];
 }
 
 function attr(
@@ -154,9 +220,9 @@ describe("otel export", () => {
     scenario.beginAttempt(1);
     scenario.recordStep(action("browser_goto", { input: { url: "https://staging.example.com" } }));
     scenario.recordStep(action("browser_click", { input: { target: "Checkout button" } }));
-    scenario.end({ status: "passed", reason: "Discount applied.", attempts: 1 });
+    scenario.end({ status: "passed", reason: "Discount applied.", attempts: 1, durationMs: 1250 });
 
-    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const spans = collector.spans();
     const runSpan = byName(spans, "blop run checkout");
@@ -197,8 +263,8 @@ describe("otel export", () => {
       specFile: "/repo/tests/checkout.blop.ts",
       baseUrl: "https://staging.example.com",
     });
-    scenario.end({ status: "passed", reason: "ok", attempts: 1 });
-    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const spans = collector.spans();
     const runSpan = byName(spans, "blop run checkout")!;
@@ -226,7 +292,7 @@ describe("otel export", () => {
       startedAt: new Date("2026-08-23T10:00:00.000Z"),
       ci: GITHUB_CI,
     });
-    await run.end({ status: "failed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    await run.end({ status: "failed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const runSpan = byName(collector.spans(), "blop run checkout")!;
 
@@ -249,7 +315,7 @@ describe("otel export", () => {
       startedAt: new Date("2026-08-23T10:00:00.000Z"),
       ci: NO_CI,
     });
-    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const runSpan = byName(collector.spans(), "blop run local")!;
     expect(attr(runSpan, "cicd.pipeline.result")).toBeUndefined();
@@ -274,8 +340,8 @@ describe("otel export", () => {
         input: { url: "https://staging.example.com/cart" },
       }),
     );
-    scenario.end({ status: "passed", reason: "ok", attempts: 1 });
-    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const goto = byName(collector.spans(), "browser_goto")!;
     expect(durationMs(goto)).toBe(1500);
@@ -302,8 +368,8 @@ describe("otel export", () => {
         output: "<html>a very long DOM snapshot</html>",
       }),
     );
-    scenario.end({ status: "passed", reason: "ok", attempts: 1 });
-    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const spans = collector.spans();
     const type = byName(spans, "browser_type")!;
@@ -319,7 +385,7 @@ describe("otel export", () => {
     expect(serialized).not.toContain("DOM snapshot");
   });
 
-  test("records bookkeeping tools and batches as events rather than steps", async () => {
+  test("nests the inner steps of a batching tool under it", async () => {
     const collector = await startCollector();
     const run = startOtelRun(collector.config(), {
       runId: "run_abc",
@@ -329,29 +395,83 @@ describe("otel export", () => {
     });
 
     const scenario = run.startScenario({ name: "checkout > batched" });
+
+    // The runner opens a live span before the tool runs. browser_run_steps
+    // executes its inner tools internally, so their actions land while the
+    // batch span is still open.
+    const batch = scenario.beginStep("browser_run_steps", {});
     scenario.recordStep(action("browser_goto"));
-    // The harness records inner steps first, then the batch wrapper.
     scenario.recordStep(action("browser_click"));
     scenario.recordStep(action("browser_run_steps"));
-    scenario.recordStep(action("record_critical_point"));
-    scenario.recordStep(action("finish_test"));
-    scenario.end({ status: "passed", reason: "ok", attempts: 1 });
-    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    batch.end();
+
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    const spans = collector.spans();
+    const batchSpan = byName(spans, "browser_run_steps")!;
+    const goto = byName(spans, "browser_goto")!;
+    const click = byName(spans, "browser_click")!;
+
+    // Exactly one span for the batch, with its children beneath it rather than
+    // as siblings that overlap it.
+    expect(spans.filter((span) => span.name === "browser_run_steps")).toHaveLength(1);
+    expect(goto.parentSpanId).toBe(batchSpan.spanId);
+    expect(click.parentSpanId).toBe(batchSpan.spanId);
+    expect(batchSpan.parentSpanId).toBe(byName(spans, "checkout > batched")!.spanId);
+  });
+
+  test("keeps bookkeeping tools as events rather than steps", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    const scenario = run.startScenario({ name: "checkout > bookkeeping" });
+    for (const name of ["record_critical_point", "finish_test"]) {
+      const step = scenario.beginStep(name, {});
+      scenario.recordStep(action(name));
+      step.end();
+    }
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const spans = collector.spans();
     expect(spans.map((span) => span.name).sort()).toEqual([
       "blop run checkout",
-      "browser_click",
-      "browser_goto",
-      "checkout > batched",
+      "checkout > bookkeeping",
     ]);
-
-    const scenarioSpan = byName(spans, "checkout > batched")!;
-    expect((scenarioSpan.events ?? []).map((event) => event.name).sort()).toEqual([
-      "browser_run_steps",
+    expect((byName(spans, "checkout > bookkeeping")!.events ?? []).map((e) => e.name).sort()).toEqual([
       "finish_test",
       "record_critical_point",
     ]);
+  });
+
+  test("does not duplicate a span when the harness reports the tool it already opened", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    const scenario = run.startScenario({ name: "checkout > single" });
+    const step = scenario.beginStep("browser_goto", { url: "https://staging.example.com" });
+    scenario.recordStep(action("browser_goto", { metadata: { error: "Navigation failed" } }));
+    step.end();
+    scenario.end({ status: "failed", reason: "Could not load.", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "failed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    const spans = collector.spans();
+    const goto = spans.filter((span) => span.name === "browser_goto");
+    expect(goto).toHaveLength(1);
+    // The post-completion record enriches the live span instead of adding one.
+    expect(goto[0]!.status?.code).toBe(STATUS_CODE_ERROR);
+    expect(attr(goto[0], "blop.step.url")).toBe("https://staging.example.com/");
   });
 
   test("nests a retry attempt in its own span and flags the failure", async () => {
@@ -373,8 +493,9 @@ describe("otel export", () => {
       status: "failed",
       reason: "Test timed out after 30000ms",
       attempts: 2,
+      durationMs: 1250,
     });
-    await run.end({ status: "failed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    await run.end({ status: "failed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const spans = collector.spans();
     const scenarioSpan = byName(spans, "checkout > flaky")!;
@@ -405,12 +526,110 @@ describe("otel export", () => {
     scenario.recordStep(
       action("browser_click", { metadata: { error: 'Unknown or stale element reference "e6".' } }),
     );
-    scenario.end({ status: "failed", reason: "Could not click checkout.", attempts: 1 });
-    await run.end({ status: "failed", finishedAt: new Date("2026-08-23T10:00:30.000Z") });
+    scenario.end({ status: "failed", reason: "Could not click checkout.", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "failed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
 
     const click = byName(collector.spans(), "browser_click")!;
     expect(click.status?.code).toBe(STATUS_CODE_ERROR);
     expect(click.status?.message).toContain("stale element reference");
+  });
+
+  test("exports metrics in seconds with delta temporality and no per-run dimensions", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+      team: "payments",
+    });
+
+    const scenario = run.startScenario({ name: "checkout > applies discount" });
+    scenario.beginAttempt(1);
+    scenario.beginAttempt(2);
+    scenario.recordResume(1, 2);
+    scenario.recordTokens({ input: 1200, output: 340, cache_read: 0, cache_write: 12 });
+    scenario.end({ status: "passed", reason: "ok", attempts: 2, durationMs: 2500 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    const metrics = collector.metrics();
+    const duration = metrics.find((metric) => metric.name === "blop.scenario.duration");
+    const recoveries = metrics.find((metric) => metric.name === "blop.agent.recoveries");
+    const tokens = metrics.find((metric) => metric.name === "blop.agent.tokens");
+
+    // Semantic conventions require seconds for durations.
+    expect(duration?.unit).toBe("s");
+    expect(points(duration)[0]?.sum).toBe(2.5);
+
+    // DELTA is 1 in the OTLP enum; CUMULATIVE (2) would strand a series per run.
+    expect(duration?.histogram?.aggregationTemporality).toBe(1);
+    expect(recoveries?.sum?.aggregationTemporality).toBe(1);
+
+    // A retry and a resume, tracked separately.
+    expect(
+      points(recoveries)
+        .map((point) => attr(point, "blop.recovery.kind"))
+        .sort(),
+    ).toEqual(["resume", "retry"]);
+
+    // Zero-valued token kinds are skipped rather than emitted as empty series.
+    expect(
+      points(tokens)
+        .map((point) => attr(point, "blop.token.kind"))
+        .sort(),
+    ).toEqual(["cache_write", "input", "output"]);
+    expect(points(tokens).every((point) => attr(point, "blop.team") === "payments")).toBe(true);
+
+    // Run and scenario ids would explode customer cardinality.
+    for (const metric of metrics) {
+      for (const point of points(metric)) {
+        expect(attr(point, "blop.run.id")).toBeUndefined();
+        expect(attr(point, "test.case.name")).toBeUndefined();
+        expect(attr(point, "blop.scenario.path")).toBeUndefined();
+      }
+    }
+  });
+
+  test("mirrors the CloudEvent taxonomy onto log records with trace context", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+      projectId: "proj_123",
+    });
+
+    const scenario = run.startScenario({ name: "checkout > applies discount" });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    const records = collector.logRecords();
+    const types = records.map((record) => attr(record, "cloudevents.event_type"));
+
+    // The three types that actually exist in the taxonomy, unchanged.
+    expect(types).toEqual([
+      "qa.run.started.v1",
+      "qa.run.step.finished.v1",
+      "qa.run.finished.v1",
+    ]);
+
+    const spans = collector.spans();
+    const runSpan = byName(spans, "blop run checkout")!;
+    const scenarioSpan = byName(spans, "checkout > applies discount")!;
+
+    // Correlated to the run trace, and the scenario event to its own span.
+    expect(records.every((record) => record.traceId === runSpan.traceId)).toBe(true);
+    expect(records[1]!.spanId).toBe(scenarioSpan.spanId);
+    expect(records[0]!.spanId).toBe(runSpan.spanId);
+
+    expect(attr(records[0], "cloudevents.event_source")).toBe("urn:blop:runner:cli:run_abc");
+    expect(attr(records[0], "cloudevents.event_spec_version")).toBe("1.0");
+    expect(attr(records[0], "cloudevents.event_subject")).toBe("run_abc");
+
+    const body = records[2]!.body?.kvlistValue?.values ?? [];
+    expect(attr({ attributes: body }, "status")).toBe("passed");
+    expect(attr({ attributes: body }, "project_id")).toBe("proj_123");
   });
 
   test("an unreachable collector never fails the run", async () => {
@@ -418,7 +637,11 @@ describe("otel export", () => {
       {
         // Nothing is listening here; the export must fail silently.
         tracesUrl: "http://127.0.0.1:1/v1/traces",
+        metricsUrl: "http://127.0.0.1:1/v1/metrics",
+        logsUrl: "http://127.0.0.1:1/v1/logs",
         headers: {},
+        metricsHeaders: {},
+        logsHeaders: {},
         serviceName: "blop-runner",
         propagateToApp: false,
         propagateAllowlist: [],
@@ -433,10 +656,10 @@ describe("otel export", () => {
 
     const scenario = run.startScenario({ name: "checkout > offline" });
     scenario.recordStep(action("browser_goto"));
-    scenario.end({ status: "passed", reason: "ok", attempts: 1 });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
 
     await expect(
-      run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z") }),
+      run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 }),
     ).resolves.toBeUndefined();
   });
 });

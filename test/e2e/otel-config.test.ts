@@ -101,6 +101,71 @@ describe("otel config", () => {
     }
   });
 
+  test("resolves an endpoint per signal", () => {
+    const config = resolveOtelConfig({}, { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector:4318" });
+    expect(config?.tracesUrl).toBe("http://collector:4318/v1/traces");
+    expect(config?.metricsUrl).toBe("http://collector:4318/v1/metrics");
+    expect(config?.logsUrl).toBe("http://collector:4318/v1/logs");
+  });
+
+  test("honours signal-specific endpoints verbatim", () => {
+    const config = resolveOtelConfig(
+      {},
+      {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://generic:4318",
+        OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://metrics:4318/custom",
+      },
+    );
+    expect(config?.tracesUrl).toBe("http://generic:4318/v1/traces");
+    expect(config?.metricsUrl).toBe("http://metrics:4318/custom");
+  });
+
+  test("layers signal-specific headers per signal", () => {
+    const config = resolveOtelConfig(
+      {},
+      {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318",
+        OTEL_EXPORTER_OTLP_HEADERS: "authorization=shared",
+        OTEL_EXPORTER_OTLP_LOGS_HEADERS: "x-stream=logs",
+      },
+    );
+    expect(config?.headers).toEqual({ authorization: "shared" });
+    expect(config?.logsHeaders).toEqual({ authorization: "shared", "x-stream": "logs" });
+  });
+
+  test("reads the environment from OTEL_RESOURCE_ATTRIBUTES", () => {
+    const config = resolveOtelConfig(
+      {},
+      {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318",
+        OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=staging,service.version=1.2.3",
+      },
+    );
+    expect(config?.environment).toBe("staging");
+  });
+
+  test("a flag beats OTEL_RESOURCE_ATTRIBUTES for the environment", () => {
+    const config = resolveOtelConfig(
+      { otelEnvironment: "preview" },
+      {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318",
+        OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=staging",
+      },
+    );
+    expect(config?.environment).toBe("preview");
+  });
+
+  test("falls back to service.name inside OTEL_RESOURCE_ATTRIBUTES", () => {
+    const config = resolveOtelConfig(
+      {},
+      {
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://c:4318",
+        OTEL_RESOURCE_ATTRIBUTES: "service.name=storefront-qa",
+      },
+    );
+    expect(config?.serviceName).toBe("storefront-qa");
+  });
+
   test("parses host lists", () => {
     expect(parseHostList("a.com,b.com")).toEqual(["a.com", "b.com"]);
     expect(parseHostList(" A.com , ,b.com ")).toEqual(["a.com", "b.com"]);

@@ -18,6 +18,7 @@ import { launchLocalBrowser } from "../node/browser-launcher.js";
 import { uploadRunToPlatform } from "../platform/upload.js";
 import { writeReports } from "../reporters/index.js";
 import { startOtelRun, type BlopOtelRunSpan, type BlopOtelScenarioSpan } from "../reporters/otel.js";
+import { installTraceparentPropagation } from "./otel-propagation.js";
 import { runBrowserAgentStream } from "./agent-loop.js";
 import { createStepFramePublisher } from "./live-frame-fallback.js";
 import { loadAgentTests } from "./spec.js";
@@ -67,8 +68,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   // collector configured the OTel SDK is never constructed, and any error
   // setting it up is reported and swallowed.
   let otelRun: BlopOtelRunSpan | null = null;
+  let otelConfig: ReturnType<typeof resolveOtelConfig> = null;
   try {
-    const otelConfig = resolveOtelConfig(options);
+    otelConfig = resolveOtelConfig(options);
     if (otelConfig) {
       otelRun = startOtelRun(otelConfig, {
         runId,
@@ -77,7 +79,17 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         ci: getCiMetadata(),
         provider: options.provider ?? process.env.BLOP_AGENT_PROVIDER ?? null,
         model: options.model ?? process.env.BLOP_AGENT_MODEL ?? null,
+        team: process.env.BLOP_OTEL_TEAM ?? null,
+        projectId: process.env.BLOP_PROJECT_ID ?? null,
       });
+
+      // Camoufox exists to be fingerprint-faithful, and a non-standard header
+      // on every request is a tell. Honour the explicit opt-in, but say so.
+      if (otelConfig.propagateToApp && (options.browser ?? "chromium") === "camoufox") {
+        console.error(
+          "[blop:otel] Trace propagation is on with the Camoufox browser: the traceparent header is a fingerprinting signal.",
+        );
+      }
     }
   } catch (error) {
     console.error(
@@ -130,7 +142,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const reason = `Failed to create screenshots directory: ${message}`;
-      otelScenario?.end({ status: "error", reason, attempts: 0 });
+      otelScenario?.end({ status: "error", reason, attempts: 0, durationMs: 0 });
       return {
         id: testId,
         name: test.name,
@@ -191,6 +203,20 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         reason = `Failed to create browser context: ${error instanceof Error ? error.message : String(error)}`;
         if (attempt > (options.retries ?? 0)) break;
         continue;
+      }
+
+      // Registering on the context (before any page exists) covers popups too.
+      if (otelScenario && otelConfig?.propagateToApp) {
+        try {
+          await installTraceparentPropagation(context, {
+            getContext: () => otelScenario.activeContext(),
+            allowlist: otelConfig.propagateAllowlist,
+          });
+        } catch (error) {
+          console.error(
+            `Failed to install trace propagation: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
 
       const page = await context.newPage();
@@ -333,6 +359,10 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
           },
         });
 
+        // A live span per tool call is what trace propagation injects, and it
+        // is what the inner steps of a batching tool nest under.
+        const tools = otelScenario ? instrumentTools(nativeTools, otelScenario) : nativeTools;
+
         const prompt = buildPrompt({
           name: test.name,
           goal: test.goal,
@@ -355,7 +385,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             apiKey: options.apiKey ?? process.env.BLOP_AGENT_API_KEY,
             reasoningEffort: options.reasoningEffort,
             cwd: options.cwd ?? process.cwd(),
-            nativeTools,
+            nativeTools: tools,
             signal: controller.signal,
           })) {
             if (controller.signal.aborted) {
@@ -377,6 +407,10 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 
             if (event.event_type === "error" && event.content) {
               lastAgentError = event.content;
+            }
+
+            if (event.event_type === "usage" && event.metadata) {
+              otelScenario?.recordTokens(event.metadata);
             }
 
             if (event.event_type === "step_start") {
@@ -530,7 +564,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     }
 
     const testFinishedAt = new Date();
-    otelScenario?.end({ status, reason, attempts });
+    const testDurationMs = testFinishedAt.getTime() - testStartedAt.getTime();
+    otelScenario?.end({ status, reason, attempts, durationMs: testDurationMs });
     appendProgress({
       type: "test_finish",
       test: test.name,
@@ -545,7 +580,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       reason,
       startedAt: testStartedAt.toISOString(),
       finishedAt: testFinishedAt.toISOString(),
-      durationMs: testFinishedAt.getTime() - testStartedAt.getTime(),
+      durationMs: testDurationMs,
       attempts,
       baseUrl: test.baseUrl ?? options.baseUrl ?? null,
       provider: options.provider ?? process.env.BLOP_AGENT_PROVIDER ?? null,
@@ -593,7 +628,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
               name: `(load error: ${specFile})`,
               specFile: scenarioPathFor(specFile, options.cwd),
             })
-            .end({ status: "error", reason, attempts: 0 });
+            .end({ status: "error", reason, attempts: 0, durationMs: 0 });
           results.push({
             id: createId("test"),
             name: `(load error: ${specFile})`,
@@ -692,7 +727,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   // Must complete here: the CLI calls process.exit immediately after printing
   // its summary, which would drop anything still buffered.
   try {
-    await otelRun?.end({ status, finishedAt });
+    await otelRun?.end({ status, finishedAt, durationMs: result.durationMs });
   } catch (error) {
     console.error(
       `Failed to finish OpenTelemetry export: ${error instanceof Error ? error.message : String(error)}`,
@@ -700,6 +735,31 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   }
 
   return result;
+}
+
+/**
+ * Wrap each tool so the runner sees the boundary *before* execution. The
+ * harness only reports an action once it has finished, which is too late to
+ * hand a live span's trace context to the app under test.
+ */
+function instrumentTools<T extends { name: string; execute: (input: Record<string, unknown>) => unknown }>(
+  tools: T[],
+  scenario: BlopOtelScenarioSpan,
+): T[] {
+  return tools.map((tool) => ({
+    ...tool,
+    execute: async (input: Record<string, unknown>) => {
+      const step = scenario.beginStep(tool.name, input);
+      try {
+        const result = await tool.execute(input);
+        step.end();
+        return result;
+      } catch (error) {
+        step.end(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    },
+  }));
 }
 
 /**

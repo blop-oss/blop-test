@@ -113,6 +113,11 @@ export type BlopRunOptions = {
   /** service.name on exported spans. Defaults to OTEL_SERVICE_NAME or blop-runner. */
   otelServiceName?: string;
   /**
+   * deployment.environment.name on the resource, e.g. "staging". Also settable
+   * the standard way, through OTEL_RESOURCE_ATTRIBUTES.
+   */
+  otelEnvironment?: string;
+  /**
    * Inject W3C traceparent into requests the browser makes, so the app under
    * test parents its own spans under our step span. Off unless explicitly
    * enabled, and never sent to a host outside otelPropagateAllowlist.

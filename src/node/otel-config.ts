@@ -11,8 +11,15 @@ import type { BlopRunOptions } from "../runtime/types.js";
 export type BlopOtelConfig = {
   /** Full OTLP/HTTP traces URL, e.g. http://collector:4318/v1/traces */
   tracesUrl: string;
+  metricsUrl: string;
+  logsUrl: string;
+  /** Headers for the traces signal (generic + traces-specific + options). */
   headers: Record<string, string>;
+  metricsHeaders: Record<string, string>;
+  logsHeaders: Record<string, string>;
   serviceName: string;
+  /** deployment.environment.name on the resource. Undefined when unknown. */
+  environment?: string;
   /** Inject W3C traceparent into requests the browser makes (Cut 2). */
   propagateToApp: boolean;
   /** Hosts allowed to receive trace context. Empty means propagate to nothing. */
@@ -24,29 +31,45 @@ export type BlopOtelOptions = Pick<
   | "otelEndpoint"
   | "otelHeaders"
   | "otelServiceName"
+  | "otelEnvironment"
   | "otelPropagateToApp"
   | "otelPropagateAllowlist"
 >;
 
 const DEFAULT_SERVICE_NAME = "blop-runner";
-const TRACES_PATH = "/v1/traces";
+
+const SIGNAL_PATHS = {
+  traces: "/v1/traces",
+  metrics: "/v1/metrics",
+  logs: "/v1/logs",
+} as const;
+
+type Signal = keyof typeof SIGNAL_PATHS;
 
 export function resolveOtelConfig(
   options: BlopOtelOptions = {},
   env: NodeJS.ProcessEnv = process.env,
 ): BlopOtelConfig | null {
-  const tracesUrl = resolveTracesUrl(options, env);
+  const tracesUrl = resolveSignalUrl("traces", options, env);
   if (!tracesUrl) return null;
 
   return {
     tracesUrl,
-    headers: {
-      ...parseOtlpHeaders(env.OTEL_EXPORTER_OTLP_HEADERS),
-      ...parseOtlpHeaders(env.OTEL_EXPORTER_OTLP_TRACES_HEADERS),
-      ...(options.otelHeaders ?? {}),
-    },
+    metricsUrl: resolveSignalUrl("metrics", options, env)!,
+    logsUrl: resolveSignalUrl("logs", options, env)!,
+    headers: signalHeaders("traces", options, env),
+    metricsHeaders: signalHeaders("metrics", options, env),
+    logsHeaders: signalHeaders("logs", options, env),
+    // OTEL_SERVICE_NAME is the documented way, but service.name is also legal
+    // inside OTEL_RESOURCE_ATTRIBUTES; honour it before falling back.
     serviceName:
-      trimmed(options.otelServiceName) ?? trimmed(env.OTEL_SERVICE_NAME) ?? DEFAULT_SERVICE_NAME,
+      trimmed(options.otelServiceName) ??
+      trimmed(env.OTEL_SERVICE_NAME) ??
+      resourceAttribute(env.OTEL_RESOURCE_ATTRIBUTES, "service.name") ??
+      DEFAULT_SERVICE_NAME,
+    environment:
+      trimmed(options.otelEnvironment) ??
+      resourceAttribute(env.OTEL_RESOURCE_ATTRIBUTES, "deployment.environment.name"),
     propagateToApp: options.otelPropagateToApp ?? parseBoolean(env.BLOP_OTEL_PROPAGATE_TO_APP),
     propagateAllowlist:
       options.otelPropagateAllowlist ?? parseHostList(env.BLOP_OTEL_PROPAGATE_ALLOWLIST),
@@ -56,25 +79,43 @@ export function resolveOtelConfig(
 /**
  * A CLI flag or config value wins over the environment, matching how every
  * other option in this package resolves. Within the environment, the OTLP spec
- * says the signal-specific endpoint is used verbatim while the generic one has
+ * says a signal-specific endpoint is used verbatim while the generic one has
  * the signal path appended.
  */
-function resolveTracesUrl(options: BlopOtelOptions, env: NodeJS.ProcessEnv): string | null {
+function resolveSignalUrl(
+  signal: Signal,
+  options: BlopOtelOptions,
+  env: NodeJS.ProcessEnv,
+): string | null {
   const explicit = trimmed(options.otelEndpoint);
-  if (explicit) return appendTracesPath(explicit);
+  if (explicit) return appendSignalPath(explicit, signal);
 
-  const signal = trimmed(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
-  if (signal) return signal;
+  const specific = trimmed(env[`OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_ENDPOINT`]);
+  if (specific) return specific;
 
   const generic = trimmed(env.OTEL_EXPORTER_OTLP_ENDPOINT);
-  if (generic) return appendTracesPath(generic);
+  if (generic) return appendSignalPath(generic, signal);
 
   return null;
 }
 
-function appendTracesPath(endpoint: string): string {
+function appendSignalPath(endpoint: string, signal: Signal): string {
+  const path = SIGNAL_PATHS[signal];
   const base = endpoint.replace(/\/+$/, "");
-  return base.endsWith(TRACES_PATH) ? base : `${base}${TRACES_PATH}`;
+  return base.endsWith(path) ? base : `${base}${path}`;
+}
+
+/** Generic headers, then the signal-specific ones, then explicit options. */
+function signalHeaders(
+  signal: Signal,
+  options: BlopOtelOptions,
+  env: NodeJS.ProcessEnv,
+): Record<string, string> {
+  return {
+    ...parseOtlpHeaders(env.OTEL_EXPORTER_OTLP_HEADERS),
+    ...parseOtlpHeaders(env[`OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_HEADERS`]),
+    ...(options.otelHeaders ?? {}),
+  };
 }
 
 /**
@@ -95,6 +136,14 @@ export function parseOtlpHeaders(raw: string | undefined): Record<string, string
   }
 
   return headers;
+}
+
+/**
+ * Read one attribute out of `OTEL_RESOURCE_ATTRIBUTES`, which uses the same
+ * comma-separated key=value encoding as the headers variable.
+ */
+export function resourceAttribute(raw: string | undefined, key: string): string | undefined {
+  return trimmed(parseOtlpHeaders(raw)[key]);
 }
 
 export function parseHostList(raw: string | undefined): string[] {
