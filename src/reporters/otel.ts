@@ -1,4 +1,5 @@
 import {
+  defaultTextMapSetter,
   ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
@@ -10,12 +11,16 @@ import {
   type Tracer,
 } from "@opentelemetry/api";
 import { SeverityNumber, type AnyValueMap, type Logger } from "@opentelemetry/api-logs";
-import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { OTLPLogExporter as OTLPLogExporterHttpJson } from "@opentelemetry/exporter-logs-otlp-http";
+import { OTLPLogExporter as OTLPLogExporterHttpProto } from "@opentelemetry/exporter-logs-otlp-proto";
 import {
   AggregationTemporalityPreference,
-  OTLPMetricExporter,
+  OTLPMetricExporter as OTLPMetricExporterHttpJson,
 } from "@opentelemetry/exporter-metrics-otlp-http";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPMetricExporter as OTLPMetricExporterHttpProto } from "@opentelemetry/exporter-metrics-otlp-proto";
+import { OTLPTraceExporter as OTLPTraceExporterHttpJson } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPTraceExporter as OTLPTraceExporterHttpProto } from "@opentelemetry/exporter-trace-otlp-proto";
 import {
   defaultResource,
   detectResources,
@@ -28,7 +33,6 @@ import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk
 import { AlwaysOnSampler, BatchSpanProcessor, NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import {
-  ATTR_CICD_PIPELINE_RESULT,
   ATTR_CLOUDEVENTS_EVENT_ID,
   ATTR_CLOUDEVENTS_EVENT_SOURCE,
   ATTR_CLOUDEVENTS_EVENT_SPEC_VERSION,
@@ -42,7 +46,7 @@ import {
   TEST_CASE_RESULT_STATUS_VALUE_FAIL,
   TEST_CASE_RESULT_STATUS_VALUE_PASS,
 } from "@opentelemetry/semantic-conventions/incubating";
-import type { BlopOtelConfig } from "../node/otel-config.js";
+import type { BlopOtelConfig, OtlpProtocol } from "../node/otel-config.js";
 import type { BlopAction, BlopCiMetadata, BlopTestStatus } from "../runtime/types.js";
 import {
   actionError,
@@ -61,12 +65,10 @@ import {
   failureCategory,
   journeyId,
   NON_STEP_TOOLS,
-  pipelineResult,
   sanitizeUrl,
   stepEventAttributes,
   stepInputAttributes,
   suiteRunStatus,
-  truncate,
 } from "./otel-attributes.js";
 
 export * from "./otel-attributes.js";
@@ -77,13 +79,12 @@ const TRACER_NAME = "@blopai/cli";
  * Hard ceiling on how long shutdown may wait for the collector. The OTLP
  * exporter retries with backoff, so an unreachable collector would otherwise
  * add ~8s to every run. Telemetry is allowed to be lost; it is not allowed to
- * slow the suite down.
+ * slow the suite down. This single budget is shared across flush and shutdown,
+ * the remainder after flush is what shutdown gets.
  */
-const FLUSH_TIMEOUT_MS = 5_000;
-/** Per-attempt ceiling, so a hung collector cannot consume the whole budget. */
-const EXPORT_TIMEOUT_MS = 3_000;
-/** Releasing timers and sockets should be near-instant; do not wait on it. */
-const SHUTDOWN_TIMEOUT_MS = 1_000;
+const SHUTDOWN_BUDGET_MS = 5_000;
+/** The run is far shorter than any sane interval; the flush at shutdown is what actually exports. */
+const METRIC_EXPORT_INTERVAL_MS = 60_000;
 
 export type BlopOtelStep = {
   /** Close the step. Pass a message to mark it failed. */
@@ -115,13 +116,29 @@ export type BlopOtelScenarioSpan = {
   }): void;
 };
 
+export type BlopOtelTraceContext = {
+  traceparent: string;
+  tracestate?: string;
+};
+
 export type BlopOtelRunSpan = {
   startScenario(input: {
     name: string;
     specFile?: string;
     baseUrl?: string | null;
   }): BlopOtelScenarioSpan;
-  end(input: { status: BlopTestStatus; finishedAt: Date; durationMs: number }): Promise<void>;
+  /**
+   * Valid W3C trace context for the run root, so a caller that emits
+   * CloudEvents (or any other downstream) can attach them to this run's trace
+   * without reaching into the OTel SDK. Returns the context of the run span.
+   */
+  traceContext(): BlopOtelTraceContext;
+  end(input: {
+    status: BlopTestStatus;
+    finishedAt: Date;
+    durationMs: number;
+    timedOut?: boolean;
+  }): Promise<void>;
 };
 
 export type BlopOtelRunInput = {
@@ -145,19 +162,24 @@ type Instruments = {
 export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): BlopOtelRunSpan {
   const resource = buildResource(config);
 
+  // A tracer is always built, even when traces have no endpoint, so log
+  // records and trace propagation keep a parent context. Without a trace
+  // exporter the provider simply has no span processor: spans are created (so
+  // they carry span context) but never exported.
   const tracerProvider = new NodeTracerProvider({
     resource,
     // Test volume is trivial next to production traffic and a sampled test
     // trace is useless, so never sample.
     sampler: new AlwaysOnSampler(),
-    spanProcessors: [
+    spanProcessors: config.tracesUrl === null ? [] : [
       new BatchSpanProcessor(
-        new OTLPTraceExporter({
-          url: config.tracesUrl,
-          headers: config.headers,
-          timeoutMillis: EXPORT_TIMEOUT_MS,
-        }),
-        { exportTimeoutMillis: EXPORT_TIMEOUT_MS },
+        createTraceExporter(
+          config.tracesUrl,
+          config.headers,
+          config.tracesProtocol,
+          config.tracesTimeoutMs,
+        ),
+        { exportTimeoutMillis: config.tracesTimeoutMs },
       ),
     ],
   });
@@ -166,19 +188,16 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
     resource,
     readers: [
       new PeriodicExportingMetricReader({
-        exporter: new OTLPMetricExporter({
-          url: config.metricsUrl ?? undefined,
-          headers: config.metricsHeaders,
-          timeoutMillis: EXPORT_TIMEOUT_MS,
-          // A CLI run is a short-lived process. Cumulative temporality would
-          // restart every series at zero on each run and strand the previous
-          // one, so delta is the correct choice for an ephemeral producer.
-          temporalityPreference: AggregationTemporalityPreference.DELTA,
-        }),
+        exporter: createMetricExporter(
+          config.metricsUrl,
+          config.metricsHeaders,
+          config.metricsProtocol,
+          config.metricsTimeoutMs,
+        ),
         // The run is far shorter than any sane interval; the flush at shutdown
         // is what actually exports.
-        exportIntervalMillis: 60_000,
-        exportTimeoutMillis: EXPORT_TIMEOUT_MS,
+        exportIntervalMillis: METRIC_EXPORT_INTERVAL_MS,
+        exportTimeoutMillis: config.metricsTimeoutMs,
       }),
     ],
   });
@@ -187,12 +206,13 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
     resource,
     processors: [
       new BatchLogRecordProcessor({
-        exporter: new OTLPLogExporter({
-          url: config.logsUrl ?? undefined,
-          headers: config.logsHeaders,
-          timeoutMillis: EXPORT_TIMEOUT_MS,
-        }),
-        exportTimeoutMillis: EXPORT_TIMEOUT_MS,
+        exporter: createLogExporter(
+          config.logsUrl,
+          config.logsHeaders,
+          config.logsProtocol,
+          config.logsTimeoutMs,
+        ),
+        exportTimeoutMillis: config.logsTimeoutMs,
       }),
     ],
   });
@@ -222,7 +242,9 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
   const runSpan = tracer.startSpan(
     `blop run ${input.suiteName}`,
     {
-      kind: SpanKind.SERVER,
+      // The CLI run is not a server handling an inbound request; it is an
+      // internal batch of work, so INTERNAL is the correct span kind.
+      kind: SpanKind.INTERNAL,
       startTime: input.startedAt,
       attributes: {
         [ATTR_BLOP_RUN_ID]: input.runId,
@@ -259,14 +281,17 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
       return started.span;
     },
 
-    end: async ({ status, finishedAt, durationMs }) => {
+    traceContext: () => traceContextFor(runContext),
+
+    end: async ({ status, finishedAt, durationMs, timedOut = false }) => {
       for (const scenario of [...openScenarios]) scenario.abandon();
       openScenarios.clear();
 
-      runSpan.setAttribute(ATTR_TEST_SUITE_RUN_STATUS, suiteRunStatus(status));
-      if (input.ci.provider) {
-        runSpan.setAttribute(ATTR_CICD_PIPELINE_RESULT, pipelineResult(status));
-      }
+      runSpan.setAttribute(ATTR_TEST_SUITE_RUN_STATUS, suiteRunStatus(status, timedOut));
+      // cicd.pipeline.result is intentionally not set: the test process exits
+      // before the surrounding CI workflow finishes, so it cannot know the
+      // workflow's final result. The suite run status above is the only
+      // verdict this process can speak to.
       if (status !== "passed") runSpan.setStatus({ code: SpanStatusCode.ERROR });
 
       cloudEvent("qa.run.finished.v1", runContext, {
@@ -282,6 +307,68 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
       await shutdown(tracerProvider, meterProvider, loggerProvider);
     },
   };
+}
+
+function createTraceExporter(
+  url: string,
+  headers: Record<string, string>,
+  protocol: OtlpProtocol,
+  timeoutMillis: number,
+) {
+  return protocol === "http/protobuf"
+    ? new OTLPTraceExporterHttpProto({ url, headers, timeoutMillis })
+    : new OTLPTraceExporterHttpJson({ url, headers, timeoutMillis });
+}
+
+function createMetricExporter(
+  url: string,
+  headers: Record<string, string>,
+  protocol: OtlpProtocol,
+  timeoutMillis: number,
+) {
+  // A CLI run is a short-lived process: cumulative temporality would restart
+  // every series at zero on each run and strand the previous one.
+  const common = {
+    url,
+    headers,
+    timeoutMillis,
+    temporalityPreference: AggregationTemporalityPreference.DELTA,
+  };
+  return protocol === "http/protobuf"
+    ? new OTLPMetricExporterHttpProto(common)
+    : new OTLPMetricExporterHttpJson(common);
+}
+
+function createLogExporter(
+  url: string,
+  headers: Record<string, string>,
+  protocol: OtlpProtocol,
+  timeoutMillis: number,
+) {
+  return protocol === "http/protobuf"
+    ? new OTLPLogExporterHttpProto({ url, headers, timeoutMillis })
+    : new OTLPLogExporterHttpJson({ url, headers, timeoutMillis });
+}
+
+/**
+ * Build a W3C `traceparent` (and `tracestate` if present) for a context, using
+ * the official propagator so the wire format stays correct. Returns the
+ * context of the active span in `context`.
+ */
+function traceContextFor(context: Context): BlopOtelTraceContext {
+  const carrier: Record<string, string> = {};
+  // The propagator writes the W3C headers (`traceparent`, `tracestate`) into
+  // the carrier using defaultTextMapSetter, which assigns the keys verbatim.
+  new W3CTraceContextPropagator().inject(context, carrier, defaultTextMapSetter);
+  const traceparent = carrier.traceparent;
+  if (!traceparent) {
+    // Should not happen for a context that carries a span, but telemetry must
+    // never fail a run: fall back to an unsampled empty parent.
+    return { traceparent: "00-00000000000000000000000000000000-0000000000000000-00" };
+  }
+  const result: BlopOtelTraceContext = { traceparent };
+  if (carrier.tracestate) result.tracestate = carrier.tracestate;
+  return result;
 }
 
 /**
@@ -412,7 +499,10 @@ function startScenario(args: {
 
       return {
         end(error) {
-          if (error) span.setStatus({ code: SpanStatusCode.ERROR, message: truncate(error) });
+          // No raw reason message: error text can carry selectors, payloads or
+          // credentials. The categorical failure category is recorded on the
+          // scenario span, not the step.
+          if (error) span.setStatus({ code: SpanStatusCode.ERROR });
           span.end();
           if (openStep === step) openStep = null;
         },
@@ -436,7 +526,7 @@ function startScenario(args: {
         for (const [key, value] of Object.entries(stepInputAttributes(action.input))) {
           if (value !== undefined) openStep.span.setAttribute(key, value);
         }
-        if (error) openStep.span.setStatus({ code: SpanStatusCode.ERROR, message: truncate(error) });
+        if (error) openStep.span.setStatus({ code: SpanStatusCode.ERROR });
         return;
       }
 
@@ -451,7 +541,7 @@ function startScenario(args: {
         },
         hostContext(),
       );
-      if (error) span.setStatus({ code: SpanStatusCode.ERROR, message: truncate(error) });
+      if (error) span.setStatus({ code: SpanStatusCode.ERROR });
       span.end(timestamp);
     },
 
@@ -515,7 +605,10 @@ function startScenario(args: {
       const category = status === "passed" ? null : failureCategory(status, reason);
       if (category) {
         scenarioSpan.setAttribute(ATTR_BLOP_FAILURE_CATEGORY, category);
-        scenarioSpan.setStatus({ code: SpanStatusCode.ERROR, message: truncate(reason) });
+        // ERROR status with no raw reason message: the failure category is the
+        // bounded, safe dimension we expose; the free-form reason text stays
+        // in the runner's own report and never reaches the collector.
+        scenarioSpan.setStatus({ code: SpanStatusCode.ERROR });
       }
 
       // Seconds, per the metric semantic conventions. The histogram's own count
@@ -556,10 +649,7 @@ function startScenario(args: {
 
     scenarioSpan.setAttribute(ATTR_TEST_CASE_RESULT_STATUS, TEST_CASE_RESULT_STATUS_VALUE_FAIL);
     scenarioSpan.setAttribute(ATTR_BLOP_FAILURE_CATEGORY, "abandoned");
-    scenarioSpan.setStatus({
-      code: SpanStatusCode.ERROR,
-      message: "The run ended before this scenario finished.",
-    });
+    scenarioSpan.setStatus({ code: SpanStatusCode.ERROR });
     scenarioSpan.end(finishedAt);
     onEnded();
   };
@@ -584,11 +674,14 @@ async function shutdown(
     ...(loggerProvider ? [["logs", loggerProvider] as [string, LoggerProvider]] : []),
   ];
 
-  // One shared budget, flushed concurrently. A per-signal timeout would let an
-  // unreachable collector stall shutdown once per signal.
+  // One shared 5-second ceiling across flush and shutdown. A per-signal timeout
+  // would let an unreachable collector stall shutdown once per signal, and a
+  // separate shutdown budget would let the two phases together exceed the
+  // documented ceiling. Flush takes what it needs; shutdown gets the remainder.
+  const start = Date.now();
   const flushed = await settleWithin(
     providers.map(([, provider]) => provider.forceFlush()),
-    FLUSH_TIMEOUT_MS,
+    SHUTDOWN_BUDGET_MS,
   );
 
   flushed.forEach((outcome, index) => {
@@ -597,10 +690,11 @@ async function shutdown(
     }
   });
 
+  const remaining = Math.max(0, SHUTDOWN_BUDGET_MS - (Date.now() - start));
   // Failures are already reported; shutdown just releases timers and sockets.
   await settleWithin(
     providers.map(([, provider]) => provider.shutdown()),
-    SHUTDOWN_TIMEOUT_MS,
+    remaining,
   );
 }
 
@@ -637,10 +731,10 @@ async function settleWithin(promises: Promise<unknown>[], budgetMs: number): Pro
 }
 
 /**
- * Resolve or reject within FLUSH_TIMEOUT_MS, and always clear the timer so a
+ * Resolve or reject within `budgetMs`, and always clear the timer so a
  * pending handle cannot keep the CLI process alive.
  */
-async function withTimeout<T>(promise: Promise<T>, label: string, budgetMs = FLUSH_TIMEOUT_MS): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, label: string, budgetMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${budgetMs}ms`)), budgetMs);

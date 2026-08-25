@@ -1,16 +1,32 @@
 import type { BlopRunOptions } from "../runtime/types.js";
 
 /**
+ * OTLP transport protocol for a signal. Only the HTTP flavours are supported;
+ * gRPC is rejected explicitly so a customer who configures it does not silently
+ * get JSON exports against a collector that is not listening for them.
+ */
+export type OtlpProtocol = "http/protobuf" | "http/json";
+
+/**
  * Resolved OpenTelemetry settings for a run.
  *
  * Mirrors the "skipped, not failed" contract of the platform upload boundary:
- * when no endpoint is configured this resolver returns null and the runner
- * never touches the OTel SDK. Telemetry is opt-in and must never be able to
- * fail a test run.
+ * when no endpoint is configured for any signal this resolver returns null and
+ * the runner never touches the OTel SDK. Telemetry is opt-in and must never be
+ * able to fail a test run.
+ *
+ * Each signal resolves independently: a run can export traces only, metrics
+ * only, logs only, or any combination. `resolve` returns a non-null config as
+ * long as at least one signal has somewhere to send data.
  */
 export type BlopOtelConfig = {
-  /** Full OTLP/HTTP traces URL, e.g. http://collector:4318/v1/traces */
-  tracesUrl: string;
+  /**
+   * Full OTLP/HTTP traces URL, e.g. http://collector:4318/v1/traces. Null when
+   * no traces endpoint resolved; in that case a tracer is still constructed
+   * so log records and trace propagation keep a parent context, but no trace
+   * data is exported.
+   */
+  tracesUrl: string | null;
   /**
    * Null when no endpoint resolves for the signal. The OTLP default would be
    * localhost:4318, so exporting anyway would quietly post a customer's
@@ -18,6 +34,14 @@ export type BlopOtelConfig = {
    */
   metricsUrl: string | null;
   logsUrl: string | null;
+  /** Per-signal transport protocol. Defaults to http/protobuf. */
+  tracesProtocol: OtlpProtocol;
+  metricsProtocol: OtlpProtocol;
+  logsProtocol: OtlpProtocol;
+  /** Standard OTLP timeout per signal, capped below the CLI shutdown budget. */
+  tracesTimeoutMs: number;
+  metricsTimeoutMs: number;
+  logsTimeoutMs: number;
   /** Headers for the traces signal (generic + traces-specific + options). */
   headers: Record<string, string>;
   metricsHeaders: Record<string, string>;
@@ -42,6 +66,9 @@ export type BlopOtelOptions = Pick<
 >;
 
 const DEFAULT_SERVICE_NAME = "blop-runner";
+const DEFAULT_PROTOCOL: OtlpProtocol = "http/protobuf";
+const DEFAULT_EXPORT_TIMEOUT_MS = 10_000;
+const MAX_EXPORT_TIMEOUT_MS = 4_500;
 
 const SIGNAL_PATHS = {
   traces: "/v1/traces",
@@ -51,17 +78,42 @@ const SIGNAL_PATHS = {
 
 type Signal = keyof typeof SIGNAL_PATHS;
 
+const SUPPORTED_PROTOCOLS: ReadonlySet<string> = new Set<OtlpProtocol>([
+  "http/protobuf",
+  "http/json",
+]);
+
+/**
+ * Resolve OpenTelemetry settings for a run. Returns null when no signal has a
+ * configured endpoint. Throws when a signal that has an endpoint is configured
+ * with an unsupported (gRPC) protocol, so it is never silently downgraded.
+ */
 export function resolveOtelConfig(
   options: BlopOtelOptions = {},
   env: NodeJS.ProcessEnv = process.env,
 ): BlopOtelConfig | null {
   const tracesUrl = resolveSignalUrl("traces", options, env);
-  if (!tracesUrl) return null;
+  const metricsUrl = resolveSignalUrl("metrics", options, env);
+  const logsUrl = resolveSignalUrl("logs", options, env);
+  if (!tracesUrl && !metricsUrl && !logsUrl) return null;
+
+  // Protocols are only resolved for signals that actually have an endpoint,
+  // so a globally-set gRPC protocol that nothing uses is harmless instead of
+  // a hard failure.
+  const tracesProtocol = tracesUrl ? resolveSignalProtocol("traces", env) : DEFAULT_PROTOCOL;
+  const metricsProtocol = metricsUrl ? resolveSignalProtocol("metrics", env) : DEFAULT_PROTOCOL;
+  const logsProtocol = logsUrl ? resolveSignalProtocol("logs", env) : DEFAULT_PROTOCOL;
 
   return {
     tracesUrl,
-    metricsUrl: resolveSignalUrl("metrics", options, env),
-    logsUrl: resolveSignalUrl("logs", options, env),
+    metricsUrl,
+    logsUrl,
+    tracesProtocol,
+    metricsProtocol,
+    logsProtocol,
+    tracesTimeoutMs: resolveSignalTimeout("traces", env),
+    metricsTimeoutMs: resolveSignalTimeout("metrics", env),
+    logsTimeoutMs: resolveSignalTimeout("logs", env),
     headers: signalHeaders("traces", options, env),
     metricsHeaders: signalHeaders("metrics", options, env),
     logsHeaders: signalHeaders("logs", options, env),
@@ -113,20 +165,50 @@ function resolveSignalUrl(
 }
 
 /**
- * Strip a trailing signal path before appending this signal's own. Only
- * checking the target signal's path would turn a traces-shaped base into
- * `/v1/traces/v1/metrics`.
+ * Append the signal's resource path to a generic endpoint, preserving any
+ * existing path. The OTLP specification is literal: `${endpoint}/v1/<signal>`,
+ * so a base like `http://collector:4318/foo` becomes
+ * `http://collector:4318/foo/v1/traces`. We never strip an existing path
+ * (including an existing `/v1/traces`), matching the official SDK behaviour and
+ * keeping the customer's intent intact.
  */
 function appendSignalPath(endpoint: string, signal: Signal): string {
-  let base = endpoint.replace(/\/+$/, "");
-  for (const path of Object.values(SIGNAL_PATHS)) {
-    if (base.endsWith(path)) {
-      base = base.slice(0, -path.length);
-      break;
-    }
-  }
-
+  const base = endpoint.replace(/\/+$/, "");
   return `${base}${SIGNAL_PATHS[signal]}`;
+}
+
+/**
+ * Resolve the transport protocol for a signal. The signal-specific variable
+ * wins over the generic one; both default to http/protobuf per the spec.
+ */
+function resolveSignalProtocol(signal: Signal, env: NodeJS.ProcessEnv): OtlpProtocol {
+  const specific = trimmed(env[`OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_PROTOCOL`]);
+  if (specific) return normalizeProtocol(specific, signal);
+
+  const generic = trimmed(env.OTEL_EXPORTER_OTLP_PROTOCOL);
+  if (generic) return normalizeProtocol(generic, signal);
+
+  return DEFAULT_PROTOCOL;
+}
+
+function normalizeProtocol(value: string, signal: Signal): OtlpProtocol {
+  const lower = value.trim().toLowerCase();
+  if (SUPPORTED_PROTOCOLS.has(lower as OtlpProtocol)) return lower as OtlpProtocol;
+  // gRPC and anything else we do not implement: report it loudly so the
+  // caller can decide whether to fail the run or fall back to HTTP itself.
+  throw new Error(
+    `OpenTelemetry ${signal} protocol "${value}" is not supported by the Blop exporter. ` +
+      `Use "http/protobuf" or "http/json" (got "${value}").`,
+  );
+}
+
+function resolveSignalTimeout(signal: Signal, env: NodeJS.ProcessEnv): number {
+  const raw =
+    trimmed(env[`OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_TIMEOUT`]) ??
+    trimmed(env.OTEL_EXPORTER_OTLP_TIMEOUT);
+  const parsed = raw ? Number(raw) : DEFAULT_EXPORT_TIMEOUT_MS;
+  const timeout = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_EXPORT_TIMEOUT_MS;
+  return Math.min(timeout, MAX_EXPORT_TIMEOUT_MS);
 }
 
 /** Generic headers, then the signal-specific ones, then explicit options. */

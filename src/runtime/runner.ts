@@ -10,7 +10,7 @@ import {
 } from "@blopai/browser-harness";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import type { Browser, BrowserContextOptions, Page } from "playwright";
 import { getCiMetadata } from "../node/ci.js";
 import { resolveOtelConfig } from "../node/otel-config.js";
@@ -722,12 +722,15 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   }
 
   try {
+    const ingestTraceContext = otelRun?.traceContext();
     await uploadRunToPlatform({
       ingestUrl: options.platformUrl ?? process.env.BLOP_INGEST_URL,
       ingestSecret: options.platformApiKey ?? process.env.BLOP_INGEST_SECRET,
       projectId: process.env.BLOP_PROJECT_ID,
       trigger: process.env.BLOP_TRIGGER,
       reportDir,
+      traceparent: ingestTraceContext?.traceparent,
+      tracestate: ingestTraceContext?.tracestate,
       result,
     });
   } catch (error) {
@@ -737,7 +740,12 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   // Must complete here: the CLI calls process.exit immediately after printing
   // its summary, which would drop anything still buffered.
   try {
-    await otelRun?.end({ status, finishedAt, durationMs: result.durationMs });
+    await otelRun?.end({
+      status,
+      finishedAt,
+      durationMs: result.durationMs,
+      timedOut: results.some((testResult) => /timed out/i.test(testResult.reason)),
+    });
   } catch (error) {
     console.error(
       `Failed to finish OpenTelemetry export: ${error instanceof Error ? error.message : String(error)}`,
@@ -781,7 +789,7 @@ export function scenarioPathFor(specFile: string | undefined, cwd?: string): str
   if (!specFile) return undefined;
 
   const relativePath = relative(cwd ?? process.cwd(), specFile);
-  return relativePath && !relativePath.startsWith("..") ? relativePath : specFile;
+  return relativePath && !relativePath.startsWith("..") ? relativePath : basename(specFile);
 }
 
 /** Human label for the run span: one spec file reads better than a count. */

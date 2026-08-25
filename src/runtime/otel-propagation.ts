@@ -61,7 +61,15 @@ export async function installTraceparentPropagation(
         await route.fallback({ headers });
       } catch {
         // A route can already be handled, or the context can close mid-flight.
-        // Propagation is best-effort and must never break a run.
+        // Propagation is best-effort and must never break a run. Best-effort
+        // fall through to the next handler so an intercepted request is never
+        // left hanging when injection fails.
+        try {
+          await route.fallback();
+        } catch {
+          // Already handled by another handler, or the context has gone away;
+          // nothing more we can do.
+        }
       }
     },
   );

@@ -19,6 +19,9 @@ export type UploadOptions = {
   reportDir?: string;
   /** Skip artifact upload (e.g. when R2 is not configured). */
   skipArtifacts?: boolean;
+  /** W3C context that correlates platform ingest with the runner trace. */
+  traceparent?: string;
+  tracestate?: string;
 };
 
 /**
@@ -45,6 +48,8 @@ export async function uploadRunToPlatform(options: UploadOptions & { result: Blo
     projectId: options.projectId,
     runId: options.runId ?? result.runId,
     trigger: options.trigger,
+    traceparent: options.traceparent,
+    tracestate: options.tracestate,
   });
 
   if (!client) {

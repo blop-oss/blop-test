@@ -10,12 +10,10 @@ import {
   ATTR_VCS_REF_HEAD_TYPE,
   ATTR_VCS_REPOSITORY_URL_FULL,
   CICD_PIPELINE_ACTION_NAME_VALUE_RUN,
-  CICD_PIPELINE_RESULT_VALUE_ERROR,
-  CICD_PIPELINE_RESULT_VALUE_FAILURE,
-  CICD_PIPELINE_RESULT_VALUE_SUCCESS,
   TEST_SUITE_RUN_STATUS_VALUE_ABORTED,
   TEST_SUITE_RUN_STATUS_VALUE_FAILURE,
   TEST_SUITE_RUN_STATUS_VALUE_SUCCESS,
+  TEST_SUITE_RUN_STATUS_VALUE_TIMED_OUT,
 } from "@opentelemetry/semantic-conventions/incubating";
 import type { BlopAction, BlopCiMetadata, BlopTestStatus } from "../runtime/types.js";
 
@@ -32,7 +30,6 @@ export const ATTR_BLOP_SCENARIO_ATTEMPTS = "blop.scenario.attempts";
 export const ATTR_BLOP_FAILURE_CATEGORY = "blop.failure.category";
 export const ATTR_BLOP_STEP_TOOL = "blop.step.tool";
 export const ATTR_BLOP_STEP_URL = "blop.step.url";
-export const ATTR_BLOP_STEP_TARGET = "blop.step.target";
 export const ATTR_BLOP_BASE_URL = "blop.base_url";
 export const ATTR_BLOP_AGENT_PROVIDER = "blop.agent.provider";
 export const ATTR_BLOP_AGENT_MODEL = "blop.agent.model";
@@ -69,17 +66,12 @@ export function failureCategory(status: BlopTestStatus, reason: string): string 
   return status === "failed" ? "assertion" : "error";
 }
 
-export function suiteRunStatus(status: BlopTestStatus): string {
+export function suiteRunStatus(status: BlopTestStatus, timedOut = false): string {
+  if (timedOut) return TEST_SUITE_RUN_STATUS_VALUE_TIMED_OUT;
   if (status === "passed") return TEST_SUITE_RUN_STATUS_VALUE_SUCCESS;
   if (status === "failed") return TEST_SUITE_RUN_STATUS_VALUE_FAILURE;
   // Blop's "error" means the harness or agent broke, not that the app failed.
   return TEST_SUITE_RUN_STATUS_VALUE_ABORTED;
-}
-
-export function pipelineResult(status: BlopTestStatus): string {
-  if (status === "passed") return CICD_PIPELINE_RESULT_VALUE_SUCCESS;
-  if (status === "failed") return CICD_PIPELINE_RESULT_VALUE_FAILURE;
-  return CICD_PIPELINE_RESULT_VALUE_ERROR;
 }
 
 export function agentAttributes(provider?: string | null, model?: string | null): Attributes {
@@ -106,28 +98,23 @@ export function ciAttributes(ci: BlopCiMetadata): Attributes {
 }
 
 /**
- * Only the fields that identify *where* a step acted. Typed text, extracted
- * page content and DOM snapshots are deliberately excluded: spans carry
- * pointers, never payloads, and tool inputs can hold credentials.
+ * Only the URL a step acted on. Typed text, extracted page content, DOM
+ * snapshots, and arbitrary target/selector text are deliberately excluded:
+ * spans carry pointers, never payloads, and tool inputs can hold credentials
+ * or free-form failure wording that must not reach a third-party collector.
  */
 export function stepInputAttributes(input: Record<string, unknown>): Attributes {
   const attributes: Attributes = {};
   if (typeof input.url === "string") {
     attributes[ATTR_BLOP_STEP_URL] = truncate(sanitizeUrl(input.url));
   }
-
-  const target = input.target ?? input.ref ?? input.selector;
-  if (typeof target === "string") attributes[ATTR_BLOP_STEP_TARGET] = truncate(target);
-
   return attributes;
 }
 
 export function stepEventAttributes(action: BlopAction): Attributes {
-  const error = actionError(action);
   return {
     [ATTR_BLOP_STEP_TOOL]: action.name,
     "blop.step.duration_ms": action.durationMs,
-    ...(error ? { "blop.step.error": truncate(error) } : {}),
   };
 }
 

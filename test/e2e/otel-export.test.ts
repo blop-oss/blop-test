@@ -27,7 +27,6 @@ type OtlpSpan = {
 };
 
 const SPAN_KIND_INTERNAL = 1;
-const SPAN_KIND_SERVER = 2;
 const STATUS_CODE_ERROR = 2;
 
 const NO_CI: BlopCiMetadata = {
@@ -112,6 +111,9 @@ async function startCollector() {
       tracesUrl: `${server.url}/v1/traces`,
       metricsUrl: `${server.url}/v1/metrics`,
       logsUrl: `${server.url}/v1/logs`,
+      tracesProtocol: "http/json",
+      metricsProtocol: "http/json",
+      logsProtocol: "http/json",
       headers: {},
       metricsHeaders: {},
       logsHeaders: {},
@@ -242,7 +244,7 @@ describe("otel export", () => {
     expect(goto!.parentSpanId).toBe(scenarioSpan!.spanId);
     expect(click!.parentSpanId).toBe(scenarioSpan!.spanId);
 
-    expect(runSpan!.kind).toBe(SPAN_KIND_SERVER);
+    expect(runSpan!.kind).toBe(SPAN_KIND_INTERNAL);
     expect(scenarioSpan!.kind).toBe(SPAN_KIND_INTERNAL);
     expect(goto!.kind).toBe(SPAN_KIND_INTERNAL);
   });
@@ -299,12 +301,34 @@ describe("otel export", () => {
     expect(attr(runSpan, "cicd.pipeline.name")).toBe("QA");
     expect(attr(runSpan, "cicd.pipeline.action.name")).toBe("RUN");
     expect(attr(runSpan, "cicd.pipeline.run.id")).toBe("120912");
-    expect(attr(runSpan, "cicd.pipeline.result")).toBe("failure");
+    // cicd.pipeline.result is intentionally not set: the test process cannot
+    // know the workflow's final result.
+    expect(attr(runSpan, "cicd.pipeline.result")).toBeUndefined();
     expect(attr(runSpan, "vcs.repository.url.full")).toBe("https://github.com/blop-oss/blop-app");
     expect(attr(runSpan, "vcs.ref.head.name")).toBe("feature/checkout");
     expect(attr(runSpan, "vcs.ref.head.type")).toBe("branch");
     expect(attr(runSpan, "vcs.change.id")).toBe("123");
     expect(attr(runSpan, "test.suite.run.status")).toBe("failure");
+  });
+
+  test("uses the standard timed_out suite status", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_timeout",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    await run.end({
+      status: "error",
+      timedOut: true,
+      finishedAt: new Date("2026-08-23T10:00:30.000Z"),
+      durationMs: 30_000,
+    });
+
+    const runSpan = byName(collector.spans(), "blop run checkout")!;
+    expect(attr(runSpan, "test.suite.run.status")).toBe("timed_out");
   });
 
   test("omits cicd attributes entirely when not running in CI", async () => {
@@ -373,7 +397,8 @@ describe("otel export", () => {
 
     const spans = collector.spans();
     const type = byName(spans, "browser_type")!;
-    expect(attr(type, "blop.step.target")).toBe("Password field");
+    // Arbitrary target/selector text is never exported; only the sanitized URL.
+    expect(attr(type, "blop.step.target")).toBeUndefined();
 
     // Basic-auth credentials in the target URL never reach the collector.
     const scenarioSpan = byName(spans, "checkout > login")!;
@@ -383,6 +408,7 @@ describe("otel export", () => {
     const serialized = JSON.stringify(type);
     expect(serialized).not.toContain("hunter2-secret");
     expect(serialized).not.toContain("DOM snapshot");
+    expect(serialized).not.toContain("Password field");
   });
 
   test("nests the inner steps of a batching tool under it", async () => {
@@ -513,7 +539,7 @@ describe("otel export", () => {
     expect((retry.events ?? []).map((event) => event.name)).toEqual(["blop.agent.resume"]);
   });
 
-  test("marks a failing step with its error", async () => {
+  test("marks a failing step with an ERROR status and no raw reason message", async () => {
     const collector = await startCollector();
     const run = startOtelRun(collector.config(), {
       runId: "run_abc",
@@ -531,7 +557,18 @@ describe("otel export", () => {
 
     const click = byName(collector.spans(), "browser_click")!;
     expect(click.status?.code).toBe(STATUS_CODE_ERROR);
-    expect(click.status?.message).toContain("stale element reference");
+    // The raw error string must never reach the collector as a span message.
+    expect(click.status?.message).toBeUndefined();
+    const serialized = JSON.stringify(click);
+    expect(serialized).not.toContain("stale element reference");
+
+    // The scenario span carries the bounded failure category, not the reason.
+    const scenarioSpan = byName(collector.spans(), "checkout > broken")!;
+    expect(scenarioSpan.status?.code).toBe(STATUS_CODE_ERROR);
+    expect(scenarioSpan.status?.message).toBeUndefined();
+    expect(attr(scenarioSpan, "blop.failure.category")).toBe("assertion");
+    const scenarioSerialized = JSON.stringify(scenarioSpan);
+    expect(scenarioSerialized).not.toContain("Could not click checkout.");
   });
 
   test("exports metrics in seconds with delta temporality and no per-run dimensions", async () => {
@@ -717,6 +754,183 @@ describe("otel export", () => {
     expect(collector.logRecords()).toHaveLength(0);
   });
 
+  test("exports metrics only when only a metrics endpoint is configured", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config({ tracesUrl: null, logsUrl: null }), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    const scenario = run.startScenario({ name: "checkout > metrics only" });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 2500 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    // No traces or logs are exported, but metrics still arrive.
+    expect(collector.spans()).toHaveLength(0);
+    expect(collector.logRecords()).toHaveLength(0);
+    const duration = collector.metrics().find((metric) => metric.name === "blop.scenario.duration");
+    expect(points(duration)).toHaveLength(1);
+    expect(points(duration)[0]?.sum).toBe(2.5);
+  });
+
+  test("exports logs only when only a logs endpoint is configured", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config({ tracesUrl: null, metricsUrl: null }), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+      projectId: "proj_123",
+    });
+
+    const scenario = run.startScenario({ name: "checkout > logs only" });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    expect(collector.spans()).toHaveLength(0);
+    expect(collector.metrics()).toHaveLength(0);
+    // CloudEvent log records still arrive, correlated to the run trace even
+    // though traces themselves are not exported.
+    const records = collector.logRecords();
+    expect(records.length).toBeGreaterThan(0);
+    const types = records.map((record) => attr(record, "cloudevents.event_type"));
+    expect(types).toContain("qa.run.started.v1");
+    expect(types).toContain("qa.run.finished.v1");
+    // Each log record carries a traceId/spanId (the run context is maintained
+    // for log correlation even with traces export off).
+    expect(records.every((record) => typeof record.traceId === "string" && record.traceId.length === 32)).toBe(true);
+    expect(records.every((record) => typeof record.spanId === "string" && record.spanId.length === 16)).toBe(true);
+  });
+
+  test("traceContext returns a valid W3C traceparent for the run root", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config(), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    const ctx = run.traceContext();
+    // W3C traceparent: version-traceid-spanid-flags
+    expect(ctx.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/);
+
+    const [version, traceId, spanId, flags] = ctx.traceparent.split("-");
+    expect(version).toBe("00");
+    expect(traceId).toMatch(/[0-9a-f]{32}/);
+    expect(spanId).toMatch(/[0-9a-f]{16}/);
+    // Runs are never sampled away, so the sampled flag is set.
+    expect(flags).toBe("01");
+
+    // The traceparent references the run root span exactly.
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+    const runSpan = byName(collector.spans(), "blop run checkout")!;
+    expect(traceId).toBe(runSpan.traceId);
+    expect(spanId).toBe(runSpan.spanId);
+  });
+
+  test("traceContext is still available when traces export is off", async () => {
+    const collector = await startCollector();
+    const run = startOtelRun(collector.config({ tracesUrl: null }), {
+      runId: "run_abc",
+      suiteName: "checkout",
+      startedAt: new Date("2026-08-23T10:00:00.000Z"),
+      ci: NO_CI,
+    });
+
+    const ctx = run.traceContext();
+    expect(ctx.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/);
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+  });
+
+  test("uses the http/protobuf exporter when the protocol is http/protobuf", async () => {
+    const contentTypes: string[] = [];
+    const server = await startFixtureServer([
+      {
+        path: "/v1/traces",
+        body: Buffer.alloc(0).toString("binary"),
+        contentType: "application/x-protobuf",
+        onRequest: (request) => {
+          contentTypes.push(request.headers["content-type"] as string);
+        },
+      },
+    ]);
+    closeServer = server.close;
+
+    const run = startOtelRun(
+      {
+        tracesUrl: `${server.url}/v1/traces`,
+        metricsUrl: null,
+        logsUrl: null,
+        tracesProtocol: "http/protobuf",
+        metricsProtocol: "http/protobuf",
+        logsProtocol: "http/protobuf",
+        headers: {},
+        metricsHeaders: {},
+        logsHeaders: {},
+        serviceName: "blop-runner",
+        propagateToApp: false,
+        propagateAllowlist: [],
+      },
+      {
+        runId: "run_abc",
+        suiteName: "checkout",
+        startedAt: new Date("2026-08-23T10:00:00.000Z"),
+        ci: NO_CI,
+      },
+    );
+    const scenario = run.startScenario({ name: "checkout > proto" });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 100 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    expect(contentTypes.some((ct) => ct === "application/x-protobuf")).toBe(true);
+  });
+
+  test("uses the http/json exporter when the protocol is http/json", async () => {
+    const contentTypes: string[] = [];
+    const server = await startFixtureServer([
+      {
+        path: "/v1/traces",
+        body: "{}",
+        contentType: "application/json",
+        onRequest: (request) => {
+          contentTypes.push(request.headers["content-type"] as string);
+        },
+      },
+    ]);
+    closeServer = server.close;
+
+    const run = startOtelRun(
+      {
+        tracesUrl: `${server.url}/v1/traces`,
+        metricsUrl: null,
+        logsUrl: null,
+        tracesProtocol: "http/json",
+        metricsProtocol: "http/json",
+        logsProtocol: "http/json",
+        headers: {},
+        metricsHeaders: {},
+        logsHeaders: {},
+        serviceName: "blop-runner",
+        propagateToApp: false,
+        propagateAllowlist: [],
+      },
+      {
+        runId: "run_abc",
+        suiteName: "checkout",
+        startedAt: new Date("2026-08-23T10:00:00.000Z"),
+        ci: NO_CI,
+      },
+    );
+    const scenario = run.startScenario({ name: "checkout > json" });
+    scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 100 });
+    await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
+
+    expect(contentTypes.some((ct) => ct === "application/json")).toBe(true);
+  });
+
   test("an unreachable collector never fails the run", async () => {
     const run = startOtelRun(
       {
@@ -724,6 +938,9 @@ describe("otel export", () => {
         tracesUrl: "http://127.0.0.1:1/v1/traces",
         metricsUrl: "http://127.0.0.1:1/v1/metrics",
         logsUrl: "http://127.0.0.1:1/v1/logs",
+        tracesProtocol: "http/protobuf",
+        metricsProtocol: "http/protobuf",
+        logsProtocol: "http/protobuf",
         headers: {},
         metricsHeaders: {},
         logsHeaders: {},
@@ -746,7 +963,7 @@ describe("otel export", () => {
     await expect(
       run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 }),
     ).resolves.toBeUndefined();
-  });
+  }, 15_000);
 });
 
 describe("otel helpers", () => {

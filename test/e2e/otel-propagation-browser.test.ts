@@ -133,4 +133,37 @@ describe("traceparent injection", () => {
     expect(seen).toEqual([undefined]);
     await context.close();
   }, 60_000);
+
+  test("falls the request through when context injection throws, so it never hangs", async () => {
+    // A throwing getContext must not leave an intercepted request dangling.
+    // The catch path best-effort calls route.fallback() so the page still loads.
+    let loaded = false;
+    const server = await startFixtureServer([
+      {
+        path: "/",
+        body: "<main>fallback fixture</main>",
+        onRequest: () => {},
+      },
+    ]);
+    closeServer = server.close;
+    const port = new URL(server.url).port;
+
+    browser = await chromium.launch();
+    const context = await browser.newContext();
+    await installTraceparentPropagation(context, {
+      // Throwing simulates a context that closed mid-flight or any internal
+      // failure inside the OTel propagator.
+      getContext: () => {
+        throw new Error("injection failed");
+      },
+      allowlist: ["127.0.0.1"],
+    });
+    const page = await context.newPage();
+    // The page must complete navigation rather than hanging on the intercept.
+    await page.goto(`http://127.0.0.1:${port}/`, { timeout: 10_000 });
+    loaded = true;
+    await context.close();
+
+    expect(loaded).toBe(true);
+  }, 60_000);
 });
