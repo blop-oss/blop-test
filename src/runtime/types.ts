@@ -34,6 +34,11 @@ export type BlopAgentTest = {
   goal: string;
   baseUrl?: string;
   timeoutMs?: number;
+  /**
+   * Absolute path of the spec file this test was loaded from. Set by the
+   * runner after loading, not by spec authors.
+   */
+  specFile?: string;
 };
 
 export type BlopAgentStep =
@@ -98,6 +103,28 @@ export type BlopRunOptions = {
   workers?: number;
   platformUrl?: string;
   platformApiKey?: string;
+  /**
+   * OTLP/HTTP collector endpoint. Overrides OTEL_EXPORTER_OTLP_ENDPOINT. When
+   * neither is set the exporter is skipped entirely and no OTel SDK is loaded.
+   */
+  otelEndpoint?: string;
+  /** Extra OTLP headers, merged over OTEL_EXPORTER_OTLP_HEADERS. */
+  otelHeaders?: Record<string, string>;
+  /** service.name on exported spans. Defaults to OTEL_SERVICE_NAME or blop-runner. */
+  otelServiceName?: string;
+  /**
+   * deployment.environment.name on the resource, e.g. "staging". Also settable
+   * the standard way, through OTEL_RESOURCE_ATTRIBUTES.
+   */
+  otelEnvironment?: string;
+  /**
+   * Inject W3C traceparent into requests the browser makes, so the app under
+   * test parents its own spans under our step span. Off unless explicitly
+   * enabled, and never sent to a host outside otelPropagateAllowlist.
+   */
+  otelPropagateToApp?: boolean;
+  /** Hosts allowed to receive trace context. Empty means propagate to nothing. */
+  otelPropagateAllowlist?: string[];
   browserContext?: BrowserContextOptions;
   reporter?: BlopReporter;
   agentStream?: BlopAgentStreamRunner;
@@ -191,5 +218,13 @@ export type BlopCiMetadata = {
   jobId: string | null;
   branch: string | null;
   commitSha: string | null;
+  /** Raw ref, e.g. `refs/pull/123/merge`. Kept for backwards compatibility. */
   pullRequest: string | null;
+  repositoryUrl: string | null;
+  workflowName: string | null;
+  runAttempt: string | null;
+  runUrl: string | null;
+  refType: "branch" | "tag" | null;
+  /** Just the number from a pull-request ref, e.g. `123`. */
+  pullRequestNumber: string | null;
 };

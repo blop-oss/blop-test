@@ -10,7 +10,12 @@ afterEach(async () => {
   closeServer = undefined;
 });
 
-type CapturedEvent = { type: string; data: Record<string, unknown> };
+type CapturedEvent = {
+  type: string;
+  traceparent?: string;
+  tracestate?: string;
+  data: Record<string, unknown>;
+};
 
 describe("platform upload", () => {
   test("emits CloudEvents started + finished with counts and top_failures", async () => {
@@ -21,7 +26,12 @@ describe("platform upload", () => {
         body: "{}",
         onRequest: (_request, body) => {
           const event = JSON.parse(body);
-          events.push({ type: event.type, data: event.data });
+          events.push({
+            type: event.type,
+            traceparent: event.traceparent,
+            tracestate: event.tracestate,
+            data: event.data,
+          });
         },
       },
       { path: "/api/ingest/artifact-upload-url", body: "R2 off", contentType: "text/plain" },
@@ -32,6 +42,8 @@ describe("platform upload", () => {
       ingestUrl: `${server.url}/api/ingest`,
       ingestSecret: "test-secret",
       projectId: "proj_123",
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      tracestate: "vendor=value",
       result: createRunResult(),
       skipArtifacts: true,
     });
@@ -44,6 +56,8 @@ describe("platform upload", () => {
     expect(types).toContain("qa.run.finished.v1");
 
     const finished = events.find((e) => e.type === "qa.run.finished.v1")!;
+    expect(finished.traceparent).toBe("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    expect(finished.tracestate).toBe("vendor=value");
     expect(finished.data.run_id).toBe("run_platform_1");
     expect(finished.data.project_id).toBe("proj_123");
     expect(finished.data.status).toBe("failed");
