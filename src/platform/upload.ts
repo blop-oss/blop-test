@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import type { BlopRunResult, BlopTestResult } from "../runtime/types.js";
-import { createIngestClient, type ArtifactPointer, type Counts, type TopFailure, type CiMetadata } from "@blopai/ingest";
+import { createIngestClient, type ArtifactPointer, type Counts, type TopFailure, type TestCaseResult, type CiMetadata } from "@blopai/ingest";
 
 export type UploadOptions = {
   /** Base URL of the blop web app serving /api/ingest. */
@@ -59,6 +59,7 @@ export async function uploadRunToPlatform(options: UploadOptions & { result: Blo
   const ci = toCiMetadata(result.results[0]?.ci);
   const counts = computeCounts(result.results);
   const topFailures = extractFailures(result.results);
+  const tests = toTestResults(result.results);
   const status = result.status === "passed" ? "passed" : "failed";
 
   await client.emitStarted();
@@ -84,6 +85,7 @@ export async function uploadRunToPlatform(options: UploadOptions & { result: Blo
     counts,
     durationMs: result.durationMs,
     topFailures,
+    tests,
     artifacts,
     ci,
   });
@@ -111,6 +113,24 @@ function extractFailures(results: BlopTestResult[]): TopFailure[] {
     failures.push({ test_file: testFile, message });
   }
   return failures;
+}
+
+function toTestResults(results: BlopTestResult[]): TestCaseResult[] {
+  const tests: TestCaseResult[] = [];
+  for (const test of results) {
+    if (test.synthetic) continue;
+    const entry: TestCaseResult = {
+      suite: "blop",
+      classname: test.specFile ?? "",
+      name: test.name,
+      status: test.status,
+      duration_ms: test.durationMs,
+    };
+    if (test.attempts > 1) entry.attempts = test.attempts;
+    if (test.status !== "passed" && test.reason) entry.message = test.reason;
+    tests.push(entry);
+  }
+  return tests;
 }
 
 function toCiMetadata(ci?: { provider: string | null; runId: string | null; branch: string | null; commitSha: string | null }): CiMetadata | undefined {

@@ -191,6 +191,20 @@ export type BlopTestResult = {
   finishedAt: string;
   durationMs: number;
   attempts: number;
+  /**
+   * Repo-relative spec file this test came from, via scenarioPathFor(). Null
+   * when unknown. Optional because this is an exported public type and test/
+   * is excluded from tsc, so a required field would break fixtures silently
+   * rather than at build time.
+   */
+  specFile?: string | null;
+  /**
+   * True for runner-synthesised failure records (spec load errors, whole-run
+   * aborts) that are not real tests. They must never get a test identity:
+   * `(load error: /abs/path)` would mint a fresh one per machine and pollute
+   * the ranked reliability view (#373) permanently.
+   */
+  synthetic?: boolean;
   baseUrl: string | null;
   provider: string | null;
   model: string | null;

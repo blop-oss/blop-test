@@ -65,6 +65,63 @@ describe("platform upload", () => {
     expect(finished.data.top_failures).toEqual([{ test_file: "fails", message: "button not found" }]);
   });
 
+  test("sends per-test rows keyed on the spec file, skipping synthetic records", async () => {
+    const events: CapturedEvent[] = [];
+    const server = await startFixtureServer([
+      {
+        path: "/api/ingest",
+        body: "{}",
+        onRequest: (_request, body) => {
+          const event = JSON.parse(body);
+          events.push({ type: event.type, data: event.data });
+        },
+      },
+    ]);
+    closeServer = server.close;
+
+    await uploadRunToPlatform({
+      ingestUrl: `${server.url}/api/ingest`,
+      ingestSecret: "test-secret",
+      projectId: "proj_123",
+      skipArtifacts: true,
+      result: {
+        runId: "run_platform_2",
+        status: "failed",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        finishedAt: "2026-01-01T00:00:01.000Z",
+        durationMs: 1000,
+        results: [
+          makeTest("checkout > guest can buy", "passed", "", { durationMs: 1200 }),
+          makeTest("checkout > card is charged", "failed", "button not found", {
+            durationMs: 900,
+            attempts: 2,
+          }),
+          makeTest("(run error)", "error", "boom", { specFile: null, synthetic: true }),
+        ],
+      },
+    });
+
+    const finished = events.find((e) => e.type === "qa.run.finished.v1")!;
+    const tests = finished.data.tests as Array<Record<string, unknown>>;
+    expect(tests).toHaveLength(2);
+    expect(tests[0]).toEqual({
+      suite: "blop",
+      classname: "e2e/checkout.blop.ts",
+      name: "checkout > guest can buy",
+      status: "passed",
+      duration_ms: 1200,
+    });
+    expect(tests[1]).toMatchObject({ attempts: 2, message: "button not found" });
+
+    // counts and top_failures keep their existing, deliberately different keys:
+    // top_failures[].test_file is the test NAME for blop runs, and changing it
+    // would fork every triage_clusters signature.
+    expect(finished.data.counts).toEqual({ passed: 1, failed: 2, skipped: 0, flaky: 0 });
+    expect((finished.data.top_failures as Array<Record<string, unknown>>)[0].test_file).toBe(
+      "checkout > card is charged"
+    );
+  });
+
   test("skips upload when platform is not configured", async () => {
     await expect(uploadRunToPlatform({ result: createRunResult() })).resolves.toEqual({
       uploaded: false,
@@ -87,7 +144,12 @@ function createRunResult(): BlopRunResult {
   };
 }
 
-function makeTest(name: string, status: BlopTestResult["status"], reason: string): BlopTestResult {
+function makeTest(
+  name: string,
+  status: BlopTestResult["status"],
+  reason: string,
+  overrides: Partial<BlopTestResult> = {}
+): BlopTestResult {
   return {
     id: `t_${name}`,
     name,
@@ -107,5 +169,7 @@ function makeTest(name: string, status: BlopTestResult["status"], reason: string
     browserLogs: [],
     actions: [],
     events: [],
+    specFile: "e2e/checkout.blop.ts",
+    ...overrides,
   };
 }
