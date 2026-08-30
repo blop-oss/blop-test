@@ -192,6 +192,18 @@ export type BlopTestResult = {
   durationMs: number;
   attempts: number;
   /**
+   * How attempt 1 ended, when the scenario was retried (#367). Null when it
+   * ran once. With `status: "passed"` and a non-passed value here, the
+   * scenario is flaky: it went green on a retry.
+   */
+  firstAttemptStatus: BlopTestStatus | null;
+  /**
+   * Agent resumes across all attempts (the MAX_AGENT_RESUMES guard). A resume
+   * re-prompts the same agent in the same live browser context, so it is not a
+   * retry and is never counted as flake (#367).
+   */
+  resumes: number;
+  /**
    * Repo-relative spec file this test came from, via scenarioPathFor(). Null
    * when unknown. Optional because this is an exported public type and test/
    * is excluded from tsc, so a required field would break fixtures silently

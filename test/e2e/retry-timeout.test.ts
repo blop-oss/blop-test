@@ -33,6 +33,30 @@ describe("retry and timeout", () => {
     expect(result.status).toBe("passed");
     expect(result.results[0].attempts).toBe(2);
     expect(result.results[0].reason).toBe("Recovered.");
+    // #367: the retry must stay visible. A pass on attempt 2 is not a pass.
+    expect(result.results[0].firstAttemptStatus).toBe("error");
+    expect(result.results[0].resumes).toBe(0);
+  });
+
+  test("a scenario that passes on the first attempt carries no retry evidence", async () => {
+    const temp = await createTempDir();
+    cleanup = temp.cleanup;
+    const specFile = await writeSpec(temp.dir, "clean.blop.ts", `
+      import { defineAgentTest } from "${process.cwd()}/src/index.ts";
+      export default defineAgentTest({ name: "clean smoke", goal: "Pass first time." });
+    `);
+    const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools }) {
+      const tools = nativeTools as Array<{ name: string; execute: (input: Record<string, unknown>) => Promise<unknown> }>;
+      await tools.find((tool) => tool.name === "finish_test")?.execute({ status: "passed", reason: "Clean." });
+      yield { event_type: "done", metadata: null, content: null };
+    };
+
+    const result = await runBlopTests({ specFiles: [specFile], reportDir: join(temp.dir, ".blop"), retries: 1, agentStream });
+
+    expect(result.status).toBe("passed");
+    expect(result.results[0].attempts).toBe(1);
+    expect(result.results[0].firstAttemptStatus).toBeNull();
+    expect(result.results[0].resumes).toBe(0);
   });
 
   test("fails a run when the agent exceeds timeout", async () => {

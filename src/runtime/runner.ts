@@ -155,6 +155,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         finishedAt: new Date().toISOString(),
         durationMs: 0,
         attempts: 0,
+        firstAttemptStatus: null,
+        resumes: 0,
         specFile: scenarioPathFor(test.specFile, options.cwd) ?? null,
         baseUrl: test.baseUrl ?? options.baseUrl ?? null,
         provider: options.provider ?? process.env.BLOP_AGENT_PROVIDER ?? null,
@@ -179,6 +181,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     let status: BlopTestStatus = "error";
     let reason = "The agent did not finish the test.";
     let attempts = 0;
+    let firstAttemptStatus: BlopTestStatus | null = null;
+    let resumeTotal = 0;
     const liveFramePath = join(screenshotsDir, "live.jpg");
     const stepFramePublisher = progressPath
       ? createStepFramePublisher({
@@ -197,6 +201,12 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     });
 
     for (let attempt = 1; attempt <= (options.retries ?? 0) + 1; attempt += 1) {
+      // Re-entering the loop means the previous attempt did not end the test,
+      // so `status` still holds its outcome. Every retry path (the normal
+      // fall-through, the catch's `continue`, and the browser-context failure
+      // `continue`) passes back through here, so this is the one place attempt
+      // 1's status can be read before it is overwritten (#367).
+      if (attempt > 1 && firstAttemptStatus === null) firstAttemptStatus = status;
       attempts = attempt;
       otelScenario?.beginAttempt(attempt);
       let context;
@@ -460,6 +470,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             resumes < MAX_AGENT_RESUMES
           ) {
             resumes += 1;
+            // `resumes` is the per-attempt budget and resets on every retry;
+            // `resumeTotal` is what reaches the ingested row (#367).
+            resumeTotal += 1;
             otelScenario?.recordResume(resumes, MAX_AGENT_RESUMES);
             if (options.verbose) {
               console.error(
@@ -593,6 +606,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       finishedAt: testFinishedAt.toISOString(),
       durationMs: testDurationMs,
       attempts,
+      firstAttemptStatus,
+      resumes: resumeTotal,
       specFile: scenarioPathFor(test.specFile, options.cwd) ?? null,
       baseUrl: test.baseUrl ?? options.baseUrl ?? null,
       provider: options.provider ?? process.env.BLOP_AGENT_PROVIDER ?? null,
@@ -650,6 +665,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             finishedAt: new Date().toISOString(),
             durationMs: 0,
             attempts: 0,
+            firstAttemptStatus: null,
+            resumes: 0,
             specFile: scenarioPathFor(specFile, options.cwd) ?? null,
             synthetic: true,
             baseUrl: options.baseUrl ?? null,
@@ -695,6 +712,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       finishedAt: new Date().toISOString(),
       durationMs: 0,
       attempts: 0,
+      firstAttemptStatus: null,
+      resumes: 0,
       specFile: null,
       synthetic: true,
       baseUrl: options.baseUrl ?? null,
