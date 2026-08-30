@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import type { BlopRunResult, BlopTestResult } from "../runtime/types.js";
-import { createIngestClient, type ArtifactPointer, type Counts, type TopFailure, type TestCaseResult, type CiMetadata } from "@blopai/ingest";
+import { createIngestClient, isFlakyResult, type ArtifactPointer, type Counts, type TopFailure, type TestCaseResult, type CiMetadata } from "@blopai/ingest";
 
 export type UploadOptions = {
   /** Base URL of the blop web app serving /api/ingest. */
@@ -97,11 +97,24 @@ function computeCounts(results: BlopTestResult[]): Counts {
   let passed = 0;
   let failed = 0;
   let skipped = 0;
+  let flaky = 0;
   for (const test of results) {
     if (test.status === "passed") passed++;
     else if (test.status === "failed" || test.status === "error") failed++;
+    // Synthetic records are counted above on purpose (they are real run
+    // failures) but never get a test identity, so they cannot be flaky.
+    if (
+      !test.synthetic &&
+      isFlakyResult({
+        status: test.status,
+        attempts: test.attempts,
+        first_status: test.firstAttemptStatus ?? undefined,
+      })
+    ) {
+      flaky++;
+    }
   }
-  return { passed, failed, skipped, flaky: 0 };
+  return { passed, failed, skipped, flaky };
 }
 
 function extractFailures(results: BlopTestResult[]): TopFailure[] {
@@ -127,6 +140,8 @@ function toTestResults(results: BlopTestResult[]): TestCaseResult[] {
       duration_ms: test.durationMs,
     };
     if (test.attempts > 1) entry.attempts = test.attempts;
+    if (test.firstAttemptStatus) entry.first_status = test.firstAttemptStatus;
+    if (test.resumes > 0) entry.resumes = test.resumes;
     if (test.status !== "passed" && test.reason) entry.message = test.reason;
     tests.push(entry);
   }

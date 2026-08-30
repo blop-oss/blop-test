@@ -122,6 +122,54 @@ describe("platform upload", () => {
     );
   });
 
+  test("a scenario that went green on a retry is uploaded as flaky, not as a plain pass", async () => {
+    const events: CapturedEvent[] = [];
+    const server = await startFixtureServer([
+      {
+        path: "/api/ingest",
+        body: "{}",
+        onRequest: (_request, body) => {
+          const event = JSON.parse(body);
+          events.push({ type: event.type, data: event.data });
+        },
+      },
+    ]);
+    closeServer = server.close;
+
+    await uploadRunToPlatform({
+      ingestUrl: `${server.url}/api/ingest`,
+      ingestSecret: "test-secret",
+      projectId: "proj_123",
+      skipArtifacts: true,
+      result: {
+        runId: "run_platform_flaky",
+        status: "passed",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        finishedAt: "2026-01-01T00:00:01.000Z",
+        durationMs: 1000,
+        results: [
+          makeTest("checkout", "passed", "", { attempts: 2, firstAttemptStatus: "failed", resumes: 0 }),
+          makeTest("login", "passed", "", { attempts: 1, firstAttemptStatus: null, resumes: 2 }),
+        ],
+      },
+    });
+
+    const finished = events.find((e) => e.type === "qa.run.finished.v1")!;
+    // One flake. The two agent resumes on `login` are not retries.
+    expect(finished.data.counts).toEqual({ passed: 2, failed: 0, skipped: 0, flaky: 1 });
+
+    const tests = finished.data.tests as Array<Record<string, unknown>>;
+    const checkout = tests.find((t) => t.name === "checkout")!;
+    expect(checkout.attempts).toBe(2);
+    expect(checkout.first_status).toBe("failed");
+    expect(checkout.resumes).toBeUndefined();
+
+    const login = tests.find((t) => t.name === "login")!;
+    expect(login.attempts).toBeUndefined();
+    expect(login.first_status).toBeUndefined();
+    expect(login.resumes).toBe(2);
+  });
+
   test("skips upload when platform is not configured", async () => {
     await expect(uploadRunToPlatform({ result: createRunResult() })).resolves.toEqual({
       uploaded: false,
@@ -159,6 +207,8 @@ function makeTest(
     finishedAt: "2026-01-01T00:00:01.000Z",
     durationMs: 500,
     attempts: 1,
+    firstAttemptStatus: null,
+    resumes: 0,
     baseUrl: null,
     provider: null,
     model: null,
