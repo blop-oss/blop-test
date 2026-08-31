@@ -65,6 +65,71 @@ describe("platform upload", () => {
     expect(finished.data.top_failures).toEqual([{ test_file: "fails", message: "button not found" }]);
   });
 
+  test("attaches bounded failure evidence to top_failures, never raw payloads", async () => {
+    const events: CapturedEvent[] = [];
+    const server = await startFixtureServer([
+      {
+        path: "/api/ingest",
+        body: "{}",
+        onRequest: (_request, body) => {
+          const event = JSON.parse(body);
+          events.push({ type: event.type, data: event.data });
+        },
+      },
+      { path: "/api/ingest/artifact-upload-url", body: "R2 off", contentType: "text/plain" },
+    ]);
+    closeServer = server.close;
+
+    const failing = makeTest("checkout", "failed", "assertion failed", {
+      baseUrl: "https://app.example.com",
+      browserLogs: [
+        {
+          type: "pageerror",
+          message: "Cannot read properties of undefined (reading 'total')",
+          url: "https://app.example.com/cart",
+          timestamp: "2026-01-01T00:00:00.500Z",
+          level: "attempt:1",
+        },
+      ],
+      actions: [
+        {
+          name: "browser_expect_text",
+          input: { target: "#total" },
+          output: "",
+          metadata: { error: "expected \"$40\" to be visible" },
+          timestamp: "2026-01-01T00:00:00.400Z",
+          durationMs: 200,
+        },
+      ],
+    });
+
+    await uploadRunToPlatform({
+      ingestUrl: `${server.url}/api/ingest`,
+      ingestSecret: "test-secret",
+      projectId: "proj_123",
+      result: {
+        runId: "run_platform_evidence",
+        status: "failed",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        finishedAt: "2026-01-01T00:00:01.000Z",
+        durationMs: 1000,
+        results: [failing],
+      },
+      skipArtifacts: true,
+    });
+
+    const finished = events.find((e) => e.type === "qa.run.finished.v1")!;
+    const failure = (finished.data.top_failures as Array<Record<string, unknown>>)[0];
+    expect(failure.failing_tool).toBe("browser_expect_text");
+    expect(failure.signals).toContain("page_error");
+    expect(failure.signals).toContain("assertion_mismatch");
+    // The whole point of the closed vocabulary: the console text, the DOM and
+    // the request URL that produced those signals never leave the runner.
+    const serialized = JSON.stringify(failure);
+    expect(serialized).not.toContain("Cannot read properties");
+    expect(serialized).not.toContain("app.example.com");
+  });
+
   test("sends per-test rows keyed on the spec file, skipping synthetic records", async () => {
     const events: CapturedEvent[] = [];
     const server = await startFixtureServer([

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { execSync } from "node:child_process";
 import type { BlopRunResult, BlopTestResult } from "../runtime/types.js";
 import { createIngestClient, isFlakyResult, type ArtifactPointer, type Counts, type TopFailure, type TestCaseResult, type CiMetadata } from "@blopai/ingest";
+import { signalsFromTestResult } from "../reporters/failure-evidence.js";
 
 export type UploadOptions = {
   /** Base URL of the blop web app serving /api/ingest. */
@@ -123,7 +124,13 @@ function extractFailures(results: BlopTestResult[]): TopFailure[] {
     if (test.status === "passed") continue;
     const testFile = test.name || "unknown";
     const message = test.reason || `${test.name} ${test.status}`;
-    failures.push({ test_file: testFile, message });
+    // #369: bounded evidence signals travel with the failure the cluster is
+    // built from, so the platform never needs to join back to `tests[]`.
+    const { signals, failingTool } = signalsFromTestResult(test);
+    const failure: TopFailure = { test_file: testFile, message };
+    if (failingTool) failure.failing_tool = failingTool;
+    if (signals.length) failure.signals = signals;
+    failures.push(failure);
   }
   return failures;
 }
