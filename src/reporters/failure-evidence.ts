@@ -74,10 +74,17 @@ export function signalsFromTestResult(source: FailureEvidenceSource): {
   signals: FailureSignal[];
   failingTool: string | null;
 } {
-  // Only the reason gets the gate rules: it is the runner's own error text.
-  // Everything below is written by the app under test and goes through
-  // signalsFromAppText, which cannot produce a gate signal.
-  const signals = new Set<FailureSignal>(signalsFromMessage(source.reason));
+  // `reason` is only the runner's own error text when the scenario never got
+  // as far as a tool call: for a normal failure runner.ts sets it to the
+  // free-form text the agent passed to finish_test, describing the app under
+  // test. Running the infrastructure gate rules over that would let an agent
+  // writing "Failed to load the order history" class a genuine regression as
+  // someone else's outage and silently suppress healing for it. Zero actions
+  // is the precise, plumbing-free test for "the runner never got going".
+  const runnerOwnedReason = source.actions.length === 0;
+  const signals = new Set<FailureSignal>(
+    runnerOwnedReason ? signalsFromMessage(source.reason) : signalsFromAppText(source.reason)
+  );
   const appOrigin = originOf(source.baseUrl);
 
   // The failing step is the last real action that recorded an error, falling
@@ -87,6 +94,7 @@ export function signalsFromTestResult(source: FailureEvidenceSource): {
   let failingTool: string | null = null;
   let failingError = "";
   let failingAction: BlopAction | null = null;
+  let sawError = false;
   for (const action of source.actions) {
     if (NON_STEP_TOOLS.has(action.name)) continue;
     const error = typeof action.metadata?.error === "string" ? action.metadata.error : "";
@@ -94,7 +102,13 @@ export function signalsFromTestResult(source: FailureEvidenceSource): {
       failingTool = action.name;
       failingError = error;
       failingAction = action;
-    } else if (failingTool === null) {
+      sawError = true;
+    } else if (!sawError) {
+      // Keep advancing: `metadata.error` is only set when a tool *throws*, and
+      // the common blop failure is every tool succeeding and the agent then
+      // calling finish_test with a failed verdict. Latching the first action
+      // instead would report browser_goto as the failing step and anchor the
+      // evidence window at the start of the scenario.
       failingTool = action.name;
       failingAction = action;
     }
@@ -107,11 +121,19 @@ export function signalsFromTestResult(source: FailureEvidenceSource): {
     signals.add("agent_provider_error");
   }
 
+  // `action.timestamp` is stamped *after* the call returns, alongside
+  // durationMs (browser-harness create-tools.js), which is why otel.ts
+  // back-dates a step span by the same amount. So the step ran over
+  // [timestamp - durationMs, timestamp], and the window has to run backwards
+  // from the end. Getting this the wrong way round discards exactly the logs a
+  // slow failure produced: a click that times out after 30s emits everything
+  // worth reading long before its own timestamp.
+  const failingEndedAt = failingAction ? Date.parse(failingAction.timestamp) : NaN;
   const windowStart = failingAction
-    ? Date.parse(failingAction.timestamp) - CORRELATION_LEAD_IN_MS
+    ? failingEndedAt - failingAction.durationMs - CORRELATION_LEAD_IN_MS
     : Date.parse(source.startedAt);
   const windowEnd = failingAction
-    ? Date.parse(failingAction.timestamp) + failingAction.durationMs + CORRELATION_LEAD_IN_MS
+    ? failingEndedAt + CORRELATION_LEAD_IN_MS
     : Date.parse(source.finishedAt);
   const inWindow = (log: BlopBrowserLog): boolean => {
     const at = Date.parse(log.timestamp);
