@@ -16,6 +16,7 @@ import {
   TEST_SUITE_RUN_STATUS_VALUE_TIMED_OUT,
 } from "@opentelemetry/semantic-conventions/incubating";
 import type { BlopAction, BlopCiMetadata, BlopTestStatus } from "../runtime/types.js";
+import { classifyFailure, type FailureSignal } from "@blopai/ingest/classify";
 
 /**
  * Blop-specific attributes live under their own namespace. The OpenTelemetry
@@ -28,6 +29,7 @@ export const ATTR_BLOP_JOURNEY_ID = "blop.journey.id";
 export const ATTR_BLOP_SCENARIO_PATH = "blop.scenario.path";
 export const ATTR_BLOP_SCENARIO_ATTEMPTS = "blop.scenario.attempts";
 export const ATTR_BLOP_FAILURE_CATEGORY = "blop.failure.category";
+export const ATTR_BLOP_FAILURE_CONFIDENCE = "blop.failure.confidence";
 export const ATTR_BLOP_STEP_TOOL = "blop.step.tool";
 export const ATTR_BLOP_STEP_URL = "blop.step.url";
 export const ATTR_BLOP_BASE_URL = "blop.base_url";
@@ -64,6 +66,34 @@ export function failureCategory(status: BlopTestStatus, reason: string): string 
   if (/without calling finish_test/i.test(reason)) return "agent_incomplete";
   if (/Failed to (create|load)/i.test(reason)) return "infrastructure";
   return status === "failed" ? "assertion" : "error";
+}
+
+/**
+ * The value `blop.failure.category` carries (#369).
+ *
+ * Prefers the classified cause - the same verdict the platform stores on the
+ * triage cluster, because it is the same function over the same signals - and
+ * falls back to {@link failureCategory}'s symptom buckets for a failure the
+ * classifier will not commit on, and for runs that carry no signals at all.
+ *
+ * A null confidence is the reliable marker that a value came from the
+ * fallback rather than from the classifier.
+ */
+export function resolveFailureCategory(
+  status: BlopTestStatus,
+  reason: string,
+  signals: readonly FailureSignal[],
+  failingTool: string | null,
+): { category: string; confidence: number | null } {
+  const verdict = classifyFailure({
+    signals,
+    failingTool,
+    hasRunnerEvidence: signals.length > 0,
+  });
+  if (verdict.failureClass !== "unknown") {
+    return { category: verdict.failureClass, confidence: verdict.confidence };
+  }
+  return { category: failureCategory(status, reason), confidence: null };
 }
 
 export function suiteRunStatus(status: BlopTestStatus, timedOut = false): string {

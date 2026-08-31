@@ -22,6 +22,7 @@ import { runBrowserAgentStream } from "./agent-loop.js";
 import { createStepFramePublisher } from "./live-frame-fallback.js";
 import { loadAgentTests } from "./spec.js";
 import type { BlopAction, BlopAgentEvent, BlopAgentTest, BlopBrowserLog, BlopCriticalPoint, BlopRunOptions, BlopRunResult, BlopScreenshot, BlopTestResult, BlopTestStatus } from "./types.js";
+import { signalsFromTestResult } from "../reporters/failure-evidence.js";
 
 // There is no default step cap: the agent keeps working until it calls
 // finish_test, the test times out, or the stall guard below trips. An explicit
@@ -589,7 +590,27 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
 
     const testFinishedAt = new Date();
     const testDurationMs = testFinishedAt.getTime() - testStartedAt.getTime();
-    otelScenario?.end({ status, reason, attempts, durationMs: testDurationMs });
+    // #369: derived once here, where every input is in scope, and used for
+    // both the OTel attribute and the per-test row the upload ships.
+    const failureEvidence = signalsFromTestResult({
+      status,
+      reason,
+      attempts,
+      firstAttemptStatus,
+      baseUrl: test.baseUrl ?? options.baseUrl ?? null,
+      browserLogs,
+      actions,
+      startedAt: testStartedAt.toISOString(),
+      finishedAt: testFinishedAt.toISOString(),
+    });
+    otelScenario?.end({
+      status,
+      reason,
+      attempts,
+      durationMs: testDurationMs,
+      signals: failureEvidence.signals,
+      failingTool: failureEvidence.failingTool,
+    });
     appendProgress({
       type: "test_finish",
       test: test.name,

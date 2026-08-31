@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { BlopOtelConfig } from "../../src/node/otel-config";
-import { failureCategory, journeyId, sanitizeUrl, startOtelRun } from "../../src/reporters/otel";
+import { failureCategory, resolveFailureCategory, journeyId, sanitizeUrl, startOtelRun } from "../../src/reporters/otel";
 import type { BlopAction, BlopCiMetadata } from "../../src/runtime/types";
 import { startFixtureServer } from "../test-utils/server";
 
@@ -1000,6 +1000,23 @@ describe("otel helpers", () => {
     expect(failureCategory("error", "Failed to load spec file: boom")).toBe("infrastructure");
     expect(failureCategory("failed", "Expected the total to be 90.")).toBe("assertion");
     expect(failureCategory("error", "Something else entirely")).toBe("error");
+  });
+
+  test("reports the classified cause on blop.failure.category", () => {
+    // #369: the attribute names the cause, not the symptom. The regex that
+    // used to answer "assertion" survives only for a failure nothing can
+    // classify.
+    const out = resolveFailureCategory("failed", "boom", ["selector_no_match"], "browser_click");
+    expect(out.category).toBe("selector_drift");
+    expect(out.confidence).toBeGreaterThan(0);
+  });
+
+  test("falls back to the old regex bucket when nothing can be classified", () => {
+    const out = resolveFailureCategory("failed", "Test timed out after 30000ms", [], null);
+    expect(out.category).toBe("timeout");
+    // A null confidence is the reliable marker that a value came from the
+    // fallback rather than from the classifier.
+    expect(out.confidence).toBeNull();
   });
 });
 

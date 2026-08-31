@@ -53,6 +53,7 @@ import {
   agentAttributes,
   ATTR_BLOP_BASE_URL,
   ATTR_BLOP_FAILURE_CATEGORY,
+  ATTR_BLOP_FAILURE_CONFIDENCE,
   ATTR_BLOP_JOURNEY_ID,
   ATTR_BLOP_RECOVERY_KIND,
   ATTR_BLOP_RUN_ID,
@@ -62,7 +63,7 @@ import {
   ATTR_BLOP_TEAM,
   ATTR_BLOP_TOKEN_KIND,
   ciAttributes,
-  failureCategory,
+  resolveFailureCategory,
   journeyId,
   NON_STEP_TOOLS,
   sanitizeUrl,
@@ -70,6 +71,7 @@ import {
   stepInputAttributes,
   suiteRunStatus,
 } from "./otel-attributes.js";
+import type { FailureSignal } from "@blopai/ingest/classify";
 
 export * from "./otel-attributes.js";
 
@@ -113,6 +115,9 @@ export type BlopOtelScenarioSpan = {
     reason: string;
     attempts: number;
     durationMs: number;
+    /** Bounded failure evidence (#369). Absent on the synthetic abort paths. */
+    signals?: readonly FailureSignal[];
+    failingTool?: string | null;
   }): void;
 };
 
@@ -586,7 +591,7 @@ function startScenario(args: {
 
     activeContext: () => hostContext(),
 
-    end({ status, reason, attempts, durationMs }) {
+    end({ status, reason, attempts, durationMs, signals, failingTool }) {
       if (ended) return;
       ended = true;
 
@@ -602,9 +607,16 @@ function startScenario(args: {
       scenarioSpan.setAttribute(ATTR_TEST_CASE_RESULT_STATUS, resultStatus);
       scenarioSpan.setAttribute(ATTR_BLOP_SCENARIO_ATTEMPTS, attempts);
 
-      const category = status === "passed" ? null : failureCategory(status, reason);
+      const resolved =
+        status === "passed"
+          ? null
+          : resolveFailureCategory(status, reason, signals ?? [], failingTool ?? null);
+      const category = resolved?.category ?? null;
       if (category) {
         scenarioSpan.setAttribute(ATTR_BLOP_FAILURE_CATEGORY, category);
+        if (resolved?.confidence !== null && resolved?.confidence !== undefined) {
+          scenarioSpan.setAttribute(ATTR_BLOP_FAILURE_CONFIDENCE, resolved.confidence);
+        }
         // ERROR status with no raw reason message: the failure category is the
         // bounded, safe dimension we expose; the free-form reason text stays
         // in the runner's own report and never reaches the collector.
@@ -613,7 +625,8 @@ function startScenario(args: {
 
       // Seconds, per the metric semantic conventions. The histogram's own count
       // already gives scenario results per journey and status, so a separate
-      // results counter would be pure duplication.
+      // results counter would be pure duplication. Confidence is span-only on
+      // purpose: a float would explode the histogram's cardinality.
       instruments.scenarioDuration?.record(durationMs / 1000, {
         [ATTR_BLOP_JOURNEY_ID]: journey,
         [ATTR_TEST_CASE_RESULT_STATUS]: resultStatus,
