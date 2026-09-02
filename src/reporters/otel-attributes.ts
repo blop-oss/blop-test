@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Attributes } from "@opentelemetry/api";
 import {
   ATTR_CICD_PIPELINE_ACTION_NAME,
@@ -25,6 +26,8 @@ import { classifyFailure, type FailureSignal } from "@blopai/ingest/classify";
  * later define that name themselves.
  */
 export const ATTR_BLOP_RUN_ID = "blop.run.id";
+export const ATTR_BLOP_CORRELATION_VERSION = "blop.correlation.version";
+export const ATTR_BLOP_SCENARIO_ID = "blop.scenario.id";
 export const ATTR_BLOP_JOURNEY_ID = "blop.journey.id";
 export const ATTR_BLOP_SCENARIO_PATH = "blop.scenario.path";
 export const ATTR_BLOP_SCENARIO_ATTEMPTS = "blop.scenario.attempts";
@@ -38,6 +41,12 @@ export const ATTR_BLOP_AGENT_MODEL = "blop.agent.model";
 export const ATTR_BLOP_RECOVERY_KIND = "blop.recovery.kind";
 export const ATTR_BLOP_TOKEN_KIND = "blop.token.kind";
 export const ATTR_BLOP_TEAM = "blop.team";
+export const ATTR_BLOP_TARGET_ENVIRONMENT = "blop.target.environment";
+export const ATTR_BLOP_TARGET_ORIGIN = "blop.target.origin";
+
+export const BLOP_CORRELATION_VERSION = "v1";
+
+const IDENTITY_SEPARATOR = "\u001f";
 
 /**
  * Tools that are bookkeeping rather than a step against the app. `finish_test`
@@ -53,6 +62,13 @@ const MAX_ATTRIBUTE_LENGTH = 256;
 export function journeyId(testName: string): string {
   const [root] = testName.split(" > ");
   return (root ?? testName).trim() || testName;
+}
+
+/** Stable identity shared with the control plane's Blop test-case tuple. */
+export function scenarioId(specFile: string, name: string): string {
+  return createHash("sha256")
+    .update([BLOP_CORRELATION_VERSION, "blop", specFile, name].join(IDENTITY_SEPARATOR))
+    .digest("hex");
 }
 
 /**
@@ -136,7 +152,8 @@ export function ciAttributes(ci: BlopCiMetadata): Attributes {
 export function stepInputAttributes(input: Record<string, unknown>): Attributes {
   const attributes: Attributes = {};
   if (typeof input.url === "string") {
-    attributes[ATTR_BLOP_STEP_URL] = truncate(sanitizeUrl(input.url));
+    const url = sanitizeUrl(input.url);
+    if (url) attributes[ATTR_BLOP_STEP_URL] = truncate(url);
   }
   return attributes;
 }
@@ -153,29 +170,31 @@ export function actionError(action: BlopAction): string | null {
 }
 
 /**
- * Basic-auth credentials and token-bearing query parameters routinely appear in
- * staging URLs. The collector is a third-party system, so strip them before a
- * URL becomes a span attribute; parameter names are kept so the shape of the
- * request is still legible.
+ * Only absolute HTTP(S) locations are safe to export. Query values, fragments,
+ * and credentials can all contain secrets; malformed and relative values are
+ * omitted because they cannot be safely separated from arbitrary user input.
  */
-const SENSITIVE_PARAM = /(token|key|secret|password|passwd|auth|signature|sig)/i;
-
-export function sanitizeUrl(value: string): string {
+export function sanitizeUrl(value: string): string | undefined {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    // Not a URL (a relative path, say); nothing to strip.
-    return value;
+    return undefined;
   }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
 
   url.username = "";
   url.password = "";
-  for (const key of [...url.searchParams.keys()]) {
-    if (SENSITIVE_PARAM.test(key)) url.searchParams.set(key, "REDACTED");
-  }
+  url.search = "";
+  url.hash = "";
 
   return url.toString();
+}
+
+export function targetOrigin(value: string): string | undefined {
+  const sanitized = sanitizeUrl(value);
+  return sanitized ? new URL(sanitized).origin : undefined;
 }
 
 export function truncate(value: string): string {

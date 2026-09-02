@@ -52,24 +52,31 @@ import {
   actionError,
   agentAttributes,
   ATTR_BLOP_BASE_URL,
+  ATTR_BLOP_CORRELATION_VERSION,
   ATTR_BLOP_FAILURE_CATEGORY,
   ATTR_BLOP_FAILURE_CONFIDENCE,
   ATTR_BLOP_JOURNEY_ID,
   ATTR_BLOP_RECOVERY_KIND,
   ATTR_BLOP_RUN_ID,
   ATTR_BLOP_SCENARIO_ATTEMPTS,
+  ATTR_BLOP_SCENARIO_ID,
   ATTR_BLOP_SCENARIO_PATH,
   ATTR_BLOP_STEP_TOOL,
   ATTR_BLOP_TEAM,
+  ATTR_BLOP_TARGET_ENVIRONMENT,
+  ATTR_BLOP_TARGET_ORIGIN,
   ATTR_BLOP_TOKEN_KIND,
   ciAttributes,
+  BLOP_CORRELATION_VERSION,
   resolveFailureCategory,
   journeyId,
   NON_STEP_TOOLS,
   sanitizeUrl,
+  scenarioId,
   stepEventAttributes,
   stepInputAttributes,
   suiteRunStatus,
+  targetOrigin,
 } from "./otel-attributes.js";
 import type { FailureSignal } from "@blopai/ingest/classify";
 
@@ -131,6 +138,7 @@ export type BlopOtelRunSpan = {
     name: string;
     specFile?: string;
     baseUrl?: string | null;
+    synthetic?: boolean;
   }): BlopOtelScenarioSpan;
   /**
    * Valid W3C trace context for the run root, so a caller that emits
@@ -155,6 +163,8 @@ export type BlopOtelRunInput = {
   model?: string | null;
   team?: string | null;
   projectId?: string | null;
+  targetEnvironment?: string | null;
+  targetUrl?: string | null;
 };
 
 /** Absent when no metrics endpoint resolved; call sites guard with `?.`. */
@@ -166,6 +176,7 @@ type Instruments = {
 
 export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): BlopOtelRunSpan {
   const resource = buildResource(config);
+  const runTargetOrigin = input.targetUrl ? targetOrigin(input.targetUrl) : undefined;
 
   // A tracer is always built, even when traces have no endpoint, so log
   // records and trace propagation keep a parent context. Without a trace
@@ -252,8 +263,11 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
       kind: SpanKind.INTERNAL,
       startTime: input.startedAt,
       attributes: {
+        [ATTR_BLOP_CORRELATION_VERSION]: BLOP_CORRELATION_VERSION,
         [ATTR_BLOP_RUN_ID]: input.runId,
         [ATTR_TEST_SUITE_NAME]: input.suiteName,
+        ...(input.targetEnvironment ? { [ATTR_BLOP_TARGET_ENVIRONMENT]: input.targetEnvironment } : {}),
+        ...(runTargetOrigin ? { [ATTR_BLOP_TARGET_ORIGIN]: runTargetOrigin } : {}),
         ...agentAttributes(input.provider, input.model),
         ...ciAttributes(input.ci),
       },
@@ -427,20 +441,29 @@ function startScenario(args: {
   instruments: Instruments;
   cloudEvent: CloudEventEmitter;
   input: BlopOtelRunInput;
-  scenario: { name: string; specFile?: string; baseUrl?: string | null };
+  scenario: { name: string; specFile?: string; baseUrl?: string | null; synthetic?: boolean };
 }): { span: BlopOtelScenarioSpan; abandon: () => void; onEnd: (fn: () => void) => void } {
   const { tracer, runContext, instruments, cloudEvent, input, scenario } = args;
   const journey = journeyId(scenario.name);
+  const baseUrl = scenario.baseUrl ? sanitizeUrl(scenario.baseUrl) : undefined;
+  const origin = scenario.baseUrl ? targetOrigin(scenario.baseUrl) : undefined;
 
   const scenarioSpan = tracer.startSpan(
     scenario.name,
     {
       kind: SpanKind.INTERNAL,
       attributes: {
+        [ATTR_BLOP_CORRELATION_VERSION]: BLOP_CORRELATION_VERSION,
+        [ATTR_BLOP_RUN_ID]: input.runId,
         [ATTR_TEST_CASE_NAME]: scenario.name,
         [ATTR_BLOP_JOURNEY_ID]: journey,
+        ...(!scenario.synthetic && scenario.specFile
+          ? { [ATTR_BLOP_SCENARIO_ID]: scenarioId(scenario.specFile, scenario.name) }
+          : {}),
         ...(scenario.specFile ? { [ATTR_BLOP_SCENARIO_PATH]: scenario.specFile } : {}),
-        ...(scenario.baseUrl ? { [ATTR_BLOP_BASE_URL]: sanitizeUrl(scenario.baseUrl) } : {}),
+        ...(baseUrl ? { [ATTR_BLOP_BASE_URL]: baseUrl } : {}),
+        ...(input.targetEnvironment ? { [ATTR_BLOP_TARGET_ENVIRONMENT]: input.targetEnvironment } : {}),
+        ...(origin ? { [ATTR_BLOP_TARGET_ORIGIN]: origin } : {}),
       },
     },
     runContext,

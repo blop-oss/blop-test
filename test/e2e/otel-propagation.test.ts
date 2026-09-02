@@ -21,9 +21,13 @@ describe("propagation allowlist", () => {
     expect(shouldPropagateTo("notstaging.example.com", ["notstaging.example.co"])).toBe(false);
   });
 
+  test("requires hostnames rather than URL or host-and-port allowlist values", () => {
+    expect(shouldPropagateTo("staging.example.com", ["https://staging.example.com"])).toBe(false);
+    expect(shouldPropagateTo("staging.example.com", ["staging.example.com:443"])).toBe(false);
+  });
+
   test("propagates to nothing when the allowlist is empty", () => {
     expect(shouldPropagateTo("staging.example.com", [])).toBe(false);
     expect(shouldPropagateTo("", ["staging.example.com"])).toBe(false);
   });
 });
-

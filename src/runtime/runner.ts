@@ -88,6 +88,8 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         model: options.model ?? process.env.BLOP_AGENT_MODEL ?? null,
         team: process.env.BLOP_OTEL_TEAM ?? null,
         projectId: process.env.BLOP_PROJECT_ID ?? null,
+        targetEnvironment: otelConfig.environment ?? null,
+        targetUrl: options.baseUrl ?? null,
       });
 
       // Camoufox exists to be fingerprint-faithful, and a non-standard header
@@ -678,6 +680,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
             ?.startScenario({
               name: `(load error: ${specFile})`,
               specFile: scenarioPathFor(specFile, options.cwd),
+              synthetic: true,
             })
             .end({ status: "error", reason, attempts: 0, durationMs: 0 });
           results.push({

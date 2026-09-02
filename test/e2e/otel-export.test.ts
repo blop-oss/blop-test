@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { BlopOtelConfig } from "../../src/node/otel-config";
-import { failureCategory, resolveFailureCategory, journeyId, sanitizeUrl, startOtelRun } from "../../src/reporters/otel";
+import {
+  failureCategory,
+  resolveFailureCategory,
+  journeyId,
+  sanitizeUrl,
+  scenarioId,
+  startOtelRun,
+} from "../../src/reporters/otel";
 import type { BlopAction, BlopCiMetadata } from "../../src/runtime/types";
 import { startFixtureServer } from "../test-utils/server";
 
@@ -216,7 +223,7 @@ describe("otel export", () => {
 
     const scenario = run.startScenario({
       name: "checkout > applies discount",
-      specFile: "/repo/tests/checkout.blop.ts",
+      specFile: "tests/checkout.blop.ts",
       baseUrl: "https://staging.example.com",
     });
     scenario.beginAttempt(1);
@@ -258,12 +265,14 @@ describe("otel export", () => {
       ci: NO_CI,
       provider: "openrouter",
       model: "anthropic/claude-sonnet-4",
+      targetEnvironment: "preview",
+      targetUrl: "https://run-user:run-password@preview.example.com/start?build=42#run-secret",
     });
 
     const scenario = run.startScenario({
       name: "checkout > applies discount",
-      specFile: "/repo/tests/checkout.blop.ts",
-      baseUrl: "https://staging.example.com",
+      specFile: "tests/checkout.blop.ts",
+      baseUrl: "https://scenario-user:scenario-password@staging.example.com/cart?coupon=SAVE#scenario-secret",
     });
     scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
     await run.end({ status: "passed", finishedAt: new Date("2026-08-23T10:00:30.000Z"), durationMs: 30_000 });
@@ -277,13 +286,37 @@ describe("otel export", () => {
     expect(attr(runSpan, "test.suite.name")).toBe("checkout");
     expect(attr(runSpan, "test.suite.run.status")).toBe("success");
     expect(attr(runSpan, "blop.run.id")).toBe("run_abc");
+    expect(attr(runSpan, "blop.correlation.version")).toBe("v1");
+    expect(attr(runSpan, "blop.target.environment")).toBe("preview");
+    expect(attr(runSpan, "blop.target.origin")).toBe("https://preview.example.com");
     expect(attr(runSpan, "blop.agent.provider")).toBe("openrouter");
     expect(attr(runSpan, "blop.agent.model")).toBe("anthropic/claude-sonnet-4");
 
     expect(attr(scenarioSpan, "test.case.name")).toBe("checkout > applies discount");
     expect(attr(scenarioSpan, "test.case.result.status")).toBe("pass");
+    expect(attr(scenarioSpan, "blop.correlation.version")).toBe("v1");
+    expect(attr(scenarioSpan, "blop.run.id")).toBe("run_abc");
+    expect(attr(scenarioSpan, "blop.scenario.id")).toBe(
+      scenarioId("tests/checkout.blop.ts", "checkout > applies discount"),
+    );
     expect(attr(scenarioSpan, "blop.journey.id")).toBe("checkout");
-    expect(attr(scenarioSpan, "blop.scenario.path")).toBe("/repo/tests/checkout.blop.ts");
+    expect(attr(scenarioSpan, "blop.scenario.path")).toBe("tests/checkout.blop.ts");
+    expect(attr(scenarioSpan, "blop.target.environment")).toBe("preview");
+    expect(attr(scenarioSpan, "blop.target.origin")).toBe("https://staging.example.com");
+    expect(attr(scenarioSpan, "blop.base_url")).toBe("https://staging.example.com/cart");
+
+    const exported = JSON.stringify(spans);
+    for (const secret of [
+      "run-user",
+      "run-password",
+      "build",
+      "run-secret",
+      "scenario-password",
+      "coupon",
+      "scenario-secret",
+    ]) {
+      expect(exported).not.toContain(secret);
+    }
   });
 
   test("maps CI metadata onto the cicd and vcs conventions", async () => {
@@ -361,7 +394,7 @@ describe("otel export", () => {
       action("browser_goto", {
         timestamp: "2026-08-23T10:00:05.000Z",
         durationMs: 1500,
-        input: { url: "https://staging.example.com/cart" },
+        input: { url: "https://staging.example.com/cart?page=2#details" },
       }),
     );
     scenario.end({ status: "passed", reason: "ok", attempts: 1, durationMs: 1250 });
@@ -384,7 +417,7 @@ describe("otel export", () => {
 
     const scenario = run.startScenario({
       name: "checkout > login",
-      baseUrl: "https://deploy:preview-pw@staging.example.com",
+      baseUrl: "https://deploy:preview-pw@staging.example.com/login?next=%2Fadmin#access-token",
     });
     scenario.recordStep(
       action("browser_type", {
@@ -402,13 +435,18 @@ describe("otel export", () => {
 
     // Basic-auth credentials in the target URL never reach the collector.
     const scenarioSpan = byName(spans, "checkout > login")!;
-    expect(attr(scenarioSpan, "blop.base_url")).toBe("https://staging.example.com/");
+    expect(attr(scenarioSpan, "blop.base_url")).toBe("https://staging.example.com/login");
+    expect(attr(scenarioSpan, "blop.target.origin")).toBe("https://staging.example.com");
 
     // Typed text and tool output must never reach the collector.
     const serialized = JSON.stringify(type);
     expect(serialized).not.toContain("hunter2-secret");
     expect(serialized).not.toContain("DOM snapshot");
     expect(serialized).not.toContain("Password field");
+    const exported = JSON.stringify(spans);
+    expect(exported).not.toContain("preview-pw");
+    expect(exported).not.toContain("next");
+    expect(exported).not.toContain("access-token");
   });
 
   test("nests the inner steps of a batching tool under it", async () => {
@@ -967,6 +1005,12 @@ describe("otel export", () => {
 });
 
 describe("otel helpers", () => {
+  test("scenario identity is a stable versioned tuple", () => {
+    expect(scenarioId("tests/checkout.blop.ts", "checkout > applies discount")).toBe(
+      "ee3ef56f467ec6f1e14c0a4be6eb78893b8b606a9432bf83f2d8eb6ed1ec8b04",
+    );
+  });
+
   test("journey id is the root describe block", () => {
     expect(journeyId("checkout > applies discount")).toBe("checkout");
     expect(journeyId("checkout > guest > applies discount")).toBe("checkout");
@@ -974,21 +1018,19 @@ describe("otel helpers", () => {
     expect(journeyId("  spaced  > child")).toBe("spaced");
   });
 
-  test("strips credentials and token parameters out of urls", () => {
+  test("exports only sanitized absolute HTTP(S) urls", () => {
     expect(sanitizeUrl("https://user:hunter2@staging.example.com/cart")).toBe(
       "https://staging.example.com/cart",
     );
     expect(sanitizeUrl("https://staging.example.com/?api_key=abc123&page=2")).toBe(
-      "https://staging.example.com/?api_key=REDACTED&page=2",
+      "https://staging.example.com/",
     );
-    expect(sanitizeUrl("https://staging.example.com/?sessionToken=abc")).toBe(
-      "https://staging.example.com/?sessionToken=REDACTED",
+    expect(sanitizeUrl("https://staging.example.com/cart?page=2#receipt")).toBe(
+      "https://staging.example.com/cart",
     );
-    // Left alone when there is nothing sensitive, or when it is not a URL.
-    expect(sanitizeUrl("https://staging.example.com/cart?page=2")).toBe(
-      "https://staging.example.com/cart?page=2",
-    );
-    expect(sanitizeUrl("/relative/path")).toBe("/relative/path");
+    expect(sanitizeUrl("/relative/path?token=secret#fragment")).toBeUndefined();
+    expect(sanitizeUrl("not a url with secret=abc")).toBeUndefined();
+    expect(sanitizeUrl("javascript:alert('secret')")).toBeUndefined();
   });
 
   test("failure category buckets the runner's own wording", () => {
