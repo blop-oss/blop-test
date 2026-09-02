@@ -49,6 +49,7 @@ export async function uploadRunToPlatform(options: UploadOptions & { result: Blo
     projectId: options.projectId,
     runId: options.runId ?? result.runId,
     trigger: options.trigger,
+    adapter: "blop",
     traceparent: options.traceparent,
     tracestate: options.tracestate,
   });
