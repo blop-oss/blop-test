@@ -8,6 +8,7 @@ import {
   type PlaywrightContainerSession,
   type Screencast,
 } from "@blopai/browser-harness";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
@@ -58,7 +59,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     throw new Error("No Blop spec files were provided.");
   }
 
-  const runId = createId("run");
+  // A uuid, not createId("run"): this id is uploaded as data.run_id and
+  // becomes runs.id, a uuid column on the platform.
+  const runId = randomUUID();
   const startedAt = new Date();
   const results: BlopTestResult[] = [];
   const hasLiveAgent = !options.agentStream;
