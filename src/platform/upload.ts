@@ -47,7 +47,12 @@ export async function uploadRunToPlatform(options: UploadOptions & { result: Blo
     ingestUrl: options.ingestUrl,
     ingestSecret: options.ingestSecret,
     projectId: options.projectId,
-    runId: options.runId ?? result.runId,
+    // BLOP_RUN_ID before the runner's own id: when CI dispatched this run, the
+    // platform already has a row for it and uploading under a fresh uuid would
+    // create a second, orphaned run rather than attaching to the dispatched
+    // one. resolveConfig's env fallback can never win here, because
+    // result.runId is always set (#370).
+    runId: options.runId ?? process.env.BLOP_RUN_ID ?? result.runId,
     trigger: options.trigger,
     adapter: "blop",
     traceparent: options.traceparent,
