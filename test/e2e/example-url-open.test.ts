@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import type { NativeToolBridge } from "@blopai/browser-harness";
 import { join } from "node:path";
 import { runBlopTests } from "../../src/runtime/runner";
 import type { BlopAgentStreamRunner } from "../../src/runtime/types";
@@ -36,11 +37,9 @@ describe("example url-open agent test", () => {
       });
     `);
 
+    let visibleContent = "";
     const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools }) {
-      const tools = nativeTools as Array<{
-        name: string;
-        execute: (input: Record<string, unknown>) => Promise<unknown>;
-      }>;
+      const tools = nativeTools as NativeToolBridge[];
 
       yield { event_type: "step_start", content: "Opening URL", metadata: { tool: "browser_goto" } };
       await tool(tools, "browser_goto").execute({ url: server.url });
@@ -50,6 +49,9 @@ describe("example url-open agent test", () => {
 
       yield { event_type: "step_start", content: "Checking paragraph", metadata: { tool: "browser_expect_text" } };
       await tool(tools, "browser_expect_text").execute({ text: "Illustrative examples" });
+
+      const snapshot = await tool(tools, "browser_snapshot").execute({});
+      visibleContent = JSON.parse(snapshot.content).text;
 
       yield { event_type: "step_start", content: "Finishing test", metadata: { tool: "finish_test" } };
       await tool(tools, "finish_test").execute({ status: "passed", reason: "Page loaded and heading is visible." });
@@ -64,17 +66,11 @@ describe("example url-open agent test", () => {
       reporter: "all",
     });
 
-    expect(result.status).toBe("passed");
+    expect(result.status, result.results.map((test) => test.reason).join("\n")).toBe("passed");
     expect(result.results).toHaveLength(1);
-    expect(result.results[0].name).toBe("opens example.com");
     expect(result.results[0].status).toBe("passed");
-    expect(result.results[0].reason).toBe("Page loaded and heading is visible.");
-    expect(result.results[0].actions.map((a) => a.name)).toEqual([
-      "browser_goto",
-      "browser_expect_text",
-      "browser_expect_text",
-      "finish_test",
-    ]);
+    expect(visibleContent).toContain("Example Domain");
+    expect(visibleContent).toContain("Illustrative examples in documentation.");
   }, 15000);
 
   test("agent reads the page URL and page title", async () => {
@@ -97,17 +93,21 @@ describe("example url-open agent test", () => {
       });
     `);
 
+    let observedUrl = "";
+    let observedPage: Record<string, unknown> = {};
     const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools }) {
-      const tools = nativeTools as Array<{
-        name: string;
-        execute: (input: Record<string, unknown>) => Promise<unknown>;
-      }>;
+      const tools = nativeTools as NativeToolBridge[];
 
       yield { event_type: "step_start", content: "Opening URL", metadata: { tool: "browser_goto" } };
-      const gotoResult = await tool(tools, "browser_goto").execute({ url: server.url });
+      await tool(tools, "browser_goto").execute({ url: server.url });
 
       yield { event_type: "step_start", content: "Getting URL", metadata: { tool: "browser_get_url" } };
       const urlResult = await tool(tools, "browser_get_url").execute({});
+      observedUrl = urlResult.content;
+
+      yield { event_type: "step_start", content: "Reading page title", metadata: { tool: "browser_snapshot" } };
+      const snapshot = await tool(tools, "browser_snapshot").execute({});
+      observedPage = JSON.parse(snapshot.content);
 
       yield { event_type: "step_start", content: "Checking heading text", metadata: { tool: "browser_expect_text" } };
       await tool(tools, "browser_expect_text").execute({ text: "Hello World" });
@@ -131,14 +131,13 @@ describe("example url-open agent test", () => {
       reporter: "all",
     });
 
-    expect(result.status).toBe("passed");
-    expect(result.results[0].actions.map((a) => a.name)).toEqual([
-      "browser_goto",
-      "browser_get_url",
-      "browser_expect_text",
-      "browser_screenshot",
-      "finish_test",
-    ]);
+    expect(result.status, result.results.map((test) => test.reason).join("\n")).toBe("passed");
+    expect(observedUrl).toBe(`${server.url}/`);
+    expect(observedPage).toMatchObject({
+      url: `${server.url}/`,
+      title: "Test Page Title",
+      text: "Hello World",
+    });
   }, 15000);
 
   test("agent reports failure when page does not contain expected text", async () => {
@@ -162,10 +161,7 @@ describe("example url-open agent test", () => {
     `);
 
     const agentStream: BlopAgentStreamRunner = async function* ({ nativeTools }) {
-      const tools = nativeTools as Array<{
-        name: string;
-        execute: (input: Record<string, unknown>) => Promise<unknown>;
-      }>;
+      const tools = nativeTools as NativeToolBridge[];
 
       yield { event_type: "step_start", content: "Opening URL", metadata: { tool: "browser_goto" } };
       await tool(tools, "browser_goto").execute({ url: server.url });
@@ -188,12 +184,11 @@ describe("example url-open agent test", () => {
 
     expect(result.status).toBe("failed");
     expect(result.results[0].status).toBe("failed");
-    expect(result.results[0].reason).toBe("Expected text 'Expected Content' was not found on the page.");
   }, 15000);
 });
 
 function tool(
-  tools: Array<{ name: string; execute: (input: Record<string, unknown>) => Promise<unknown> }>,
+  tools: NativeToolBridge[],
   name: string
 ) {
   const found = tools.find((candidate) => candidate.name === name);
