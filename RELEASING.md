@@ -1,10 +1,11 @@
 # Repository setup and releases
 
-This repository prepares `@blopai/test` 0.1.0 for standalone development and
-release. It does not create the GitHub repository, enable npm publishing, or
-establish a maintainer login. At setup time the package is not on npm, and no npm
-publisher is configured by these files. Publication requires separate authorized
-maintainer action; never infer authorization from a working build or tag.
+The canonical public repository is
+[`blop-oss/blop-test`](https://github.com/blop-oss/blop-test). GitHub Actions is
+enabled for standalone verification and release workflows. These files do not
+establish an npm maintainer login: `@blopai/test` is not yet published and npm
+trusted publishing still needs the authorized setup below. Never infer npm
+publication authorization from a working build, GitHub permissions, or a tag.
 
 ## External repository settings
 
@@ -48,9 +49,12 @@ is configured. This workflow intentionally has no publish-skipping fallback for
 already published versions; a rejected npm publish cannot create a misleading
 successful GitHub release.
 
-Publish a required testing-library version before a CLI version that depends on
-it. Verify `@blopai/browser-harness` and `@blopai/ingest` are available from npm;
-the standalone package has no workspace/file dependency substitution.
+Current CLI consumers use an immutable public Git revision of this SDK, so they
+do not require a nonexistent registry release. Before switching a consumer to a
+registry version, publish that SDK version first. Verify the recorded
+`@blopai/browser-harness` Git revision can be fetched anonymously and prepared into
+its public distribution, and verify `@blopai/ingest` is available from npm. The
+standalone package has no workspace/file dependency substitution.
 
 ## Configure npm trusted publishing
 
