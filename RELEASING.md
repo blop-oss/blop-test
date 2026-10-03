@@ -34,7 +34,7 @@ publication of a new package needs an authorized npm account with rights to the
 
 Before publishing, the maintainer must verify the source, package contents,
 license, version, and dependency availability. Install dependencies with
-`bun install --frozen-lockfile --ignore-scripts`, install Chromium, and run the
+`bun install --frozen-lockfile`, install Chromium, and run the
 complete sequence from [CONTRIBUTING.md](CONTRIBUTING.md). Inspect
 `npm pack --dry-run` as well as `bun run check:package`. Authenticate through npm's
 approved interactive/account process with the required two-factor authentication
@@ -77,9 +77,9 @@ land a reviewed change with successful CI. Use Node 22.14.0, Bun 1.3.13, and npm
 11.5.1 for the release environment. When explicitly authorized, push a tag named
 `test-v` followed by the exact package version. Do not reuse/move a release tag.
 
-[release.yml](.github/workflows/release.yml) first calls
-[ci.yml](.github/workflows/ci.yml). The publishing job then checks the tag/version
-match, performs a frozen installation with lifecycle scripts disabled, cleans and
+[release.yml](https://github.com/blop-oss/blop-test/blob/master/.github/workflows/release.yml) first calls
+[ci.yml](https://github.com/blop-oss/blop-test/blob/master/.github/workflows/ci.yml). The publishing job then checks the tag/version
+match, performs a frozen installation with the reviewed Git build trusted, cleans and
 builds, verifies npm contents/exports, and runs
 `npm publish --access public --provenance`. npm's `prepublishOnly` also cleans and
 builds. Only a successful publication proceeds to the generated-notes GitHub
@@ -88,17 +88,20 @@ live examples passed. Review the resulting package/provenance and release notes.
 
 ## Dependency resolutions and tooling choices
 
-Runtime ranges and public optional peers match the source package. The lockfile
-was generated with Bun 1.3.13 using `--lockfile-only --ignore-scripts`, seeding the
-source's exact direct resolutions, then restoring the original declared ranges
-in both package metadata and the lockfile's root. No lifecycle, build, lint,
-format, test, or publication command was executed for lockfile generation.
+Runtime dependencies and public optional peers retain the source resolutions
+except for the explicitly reviewed browser-harness compatibility update. Its
+immutable public Git revision aligns camoufox-js 0.11.1, Playwright 1.61.1, and
+Camoufox 152.0.4-beta.30, rather than selecting a newer incompatible browser.
+The SDK preserves nullable container egress as unknown instead of claiming
+reachability. Only browser-harness's Git `prepare` is explicitly trusted by
+Bun; it builds the dependency's public distribution before SDK compilation.
+The lockfile was generated with Bun 1.3.13 and records the exact source revision.
 `bun.lock` records every transitive resolution and integrity hash; frozen CI must
 not resolve newer versions opportunistically.
 
 Direct locked resolutions are:
 
-- `@blopai/browser-harness` 0.1.5; `@blopai/ingest` 0.2.0.
+- `@blopai/browser-harness` 0.1.10 at the recorded Git revision; `@blopai/ingest` 0.2.0.
 - `@opentelemetry/api` 1.9.1; `@opentelemetry/semantic-conventions` 1.43.0.
 - `@opentelemetry/core`, `resources`, `sdk-metrics`, and `sdk-trace-node` 2.10.0.
 - `@opentelemetry/api-logs`, `sdk-logs`, and the six OTLP HTTP/proto exporters
@@ -110,8 +113,8 @@ Direct locked resolutions are:
 
 Formatting covers Markdown, workflows, JSON setup, and verification scripts,
 not runtime TypeScript. Oxlint applies a focused explicit correctness rule set
-(no debugger, duplicate arguments/keys/cases, self-assignment, unreachable code,
-unsafe finally, or invalid `typeof` comparisons), not style rewrites or browser
+(no debugger, duplicate keys/cases, self-assignment, unreachable code, unsafe
+finally, or invalid `typeof` comparisons), not style rewrites or browser
 claim checkers. TypeScript remains the source typecheck/build gate. The local-link
 checker verifies file destinations, including Markdown references and image
 sources; it deliberately does not claim remote-URL or heading-anchor validation.
@@ -123,21 +126,17 @@ Compatibility risks to include in verification:
 - The source workspace linked a local `@blopai/ingest` checkout. Standalone setup
   resolves its published 0.2.0 tarball instead. Confirm the exported classifiers,
   ingest protocol, and types with build/tests and a packed consumer.
-- The source lock used a patched browser-harness 0.1.5. The exact existing
-  screenshot-readiness patch is retained under `patches/` and registered with
-  Bun's `patchedDependencies`. It crosses two paint boundaries before capture.
-  npm consumers do **not** inherit repository dependency patches; their harness
-  may differ. Do not silently claim that development patch is shipped upstream
-  or upgrade the harness without an explicit compatibility review.
+- The source lock used a patched browser-harness 0.1.5. Its screenshot readiness
+  correction now lives in the reviewed upstream source consumed by all SDK
+  installations, rather than in a development-only dependency patch.
 - Standalone transitive dependencies are newly resolved within existing ranges,
   not a byte-for-byte workspace graph. In particular Vitest resolves Vite 7.3.6
   and esbuild 0.28.2; the source workspace had Vite 7.3.3. These are recorded here,
   not hidden runtime dependency upgrades. Vite 7 development tooling needs a
   recent Node 22 (22.12+), even though the runtime engine remains `>=22`.
-- Lifecycle scripts are disabled during CI installation. The explicit build,
-  browser-install, and test gates must prove the installed graph works. Optional
-  Docker/Camoufox downloads remain environment-dependent and are not guaranteed
-  by ordinary browser-test success.
+- Frozen CI installation prepares only the explicitly trusted Git dependency
+  plus the SDK's own build. Explicit browser and Docker gates must still prove
+  actual startup, config-schema compatibility, and screenshot behavior.
 
 Keep resolutions/risks up to date when refreshing the lockfile. Do not remove a
 compatibility limitation just because deterministic tests or formatting pass.

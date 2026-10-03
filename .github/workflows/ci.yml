@@ -28,8 +28,8 @@ jobs:
           node-version: "22"
           package-manager-cache: false
 
-      - name: Install dependencies without lifecycle scripts
-        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install dependencies and reviewed Git preparation
+        run: bun install --frozen-lockfile
 
       - name: Check formatting
         run: bun run format:check

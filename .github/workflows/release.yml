@@ -51,8 +51,8 @@ jobs:
             exit 1
           fi
 
-      - name: Install dependencies without lifecycle scripts
-        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install dependencies and reviewed Git preparation
+        run: bun install --frozen-lockfile
 
       - name: Clean and build
         run: bun run clean && bun run build

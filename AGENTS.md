@@ -101,7 +101,7 @@ Use Node.js 22+ and Bun 1.3.13. Do not install at a workspace root or build a
 sibling repository. Keep the lockfile and retained harness patch together.
 
 ```bash
-bun install --frozen-lockfile --ignore-scripts
+bun install --frozen-lockfile
 bunx --no-install playwright install chromium
 bun run format:check
 bun run check:links

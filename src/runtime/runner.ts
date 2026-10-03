@@ -148,7 +148,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   // Resolved after the browser/container is up. When false, third-party
   // request failures during the run are environment limits (no internet
   // egress from the sandbox), not app bugs — the agent prompt is told so.
-  let hasInternetEgress = true;
+  let hasInternetEgress: boolean | null = true;
   // True when the browser was launched with web-security disabled (always
   // for the containerized runner). Surfaced to the agent prompt so it treats
   // genuine cross-origin requests as exercisable rather than environment
@@ -1052,7 +1052,7 @@ function lastTurnText(events: BlopAgentEvent[]): string {
   return text;
 }
 
-function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean; corsBypassed?: boolean }) {
+function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean | null; corsBypassed?: boolean }) {
   const startInstruction = input.baseUrl
     ? `The app base URL is ${input.baseUrl}. Resolve relative URLs in the goal against this base URL.`
     : "If the goal requires a URL, use browser_goto with the URL supplied by the test.";
@@ -1063,9 +1063,11 @@ function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgr
   const hasInternetEgress = input.hasInternetEgress !== false;
   const corsBypassed = input.corsBypassed !== false;
   const corsRule = corsBypassed
-    ? "- The sandbox browser has web-security disabled and CSP bypassed, so cross-origin requests (OAuth redirects, third-party iframes, cross-origin fetch/XHR) are not blocked by the sandbox itself the way they would be in a vanilla browser. Treat a cross-origin request failure as a real app/provider configuration issue, not a sandbox CORS limitation."
+    ? "- The sandbox browser has web-security disabled and CSP bypassed, so browser cross-origin enforcement is not the cause of a cross-origin request failure. Network reachability and provider rejection still require independent evidence; do not infer either an application defect or an environment limitation from CORS bypass alone."
     : "";
-  const thirdPartyRules = hasInternetEgress
+  const thirdPartyRules = input.hasInternetEgress === null
+    ? "- Container internet egress has not been verified. Do not assume external services are reachable or blocked. Distinguish first-party application evidence from third-party failures whose network/provider cause is still unverified; report the observed outcome and uncertainty rather than claiming either an app defect or an environment limitation without evidence."
+    : hasInternetEgress
     ? "- Distinguish first-party failures from third-party failures. browser_console_logs tags each failed request as [first-party] (same origin as the page) or [third-party] (external service). A [first-party] failure or an uncaught JS error from the site's own bundle is a genuine app bug — cite it as evidence. A [third-party] failure (form providers like web3forms.com, payment/checkout providers like stripe.com/paypal.com/razorpay.com, captcha, analytics) is usually a CORS or provider-side rejection: the site's request did reach the internet, but the provider refused it. Report a [third-party] failure as a real issue the site owner should investigate (wrong API key, missing CORS allowlist, misconfigured endpoint), not as a test-environment limitation — the sandbox has confirmed internet egress.\n- When a form submits to a third-party endpoint (e.g. web3forms.com, Formspree) or a checkout redirects to/handshakes with a third-party payment provider (e.g. Stripe, PayPal), exercise the real flow end-to-end and verify the site's success and failure handling. For payment providers that use test mode, use the provider's documented test cards (e.g. Stripe test card 4242 4242 4242 4242, expiry any future date, any CVC) and test keys — never real card numbers. If the provider rejects the request with a CORS or auth error, report it as a real configuration issue the site owner must fix, and flag the specific error from browser_console_logs."
     : "- Distinguish first-party failures from third-party/environment failures. This test sandbox has NO confirmed internet egress, so requests to external services cannot succeed regardless of how the site is configured. browser_console_logs tags each failed request as [first-party] (same origin as the page) or [third-party] (external service). A [first-party] failure or an uncaught JS error from the site's own bundle is a genuine app bug — cite it as evidence. A [third-party] failure (form providers like web3forms.com, payment/checkout providers like stripe.com/paypal.com/razorpay.com, captcha, analytics) is a test-environment limitation here, NOT an app bug: the sandbox cannot reach the internet, so the failure does not reflect the site's wiring. Do not fail the site solely because a [third-party] endpoint is unreachable; note it as a test-environment caveat in your reason and keep evaluating the rest of the flow.\n- When a form submits to a third-party endpoint (e.g. web3forms.com, Formspree) or a checkout redirects to/handshakes with a third-party payment provider (e.g. Stripe, PayPal), verify the client-side submission behavior instead of requiring the external round-trip to succeed: the form fields are present and required validation fires before submit, the submit action triggers the outbound request, and the site handles a failed response gracefully (error UI, not a silent hang). Treat the conversion path as working if the site wired it up correctly, and flag only the unreachable third-party as a test-environment caveat in your reason. For payment providers, note that the site owner should test with the provider's documented test cards (e.g. Stripe test card 4242 4242 4242 4242) and test keys once egress is available.";
 
@@ -1106,7 +1108,7 @@ function promptBody(input: { baseUrl?: string; maxSteps?: number; hasInternetEgr
   ].join("\n");
 }
 
-function buildPrompt(input: { name: string; goal: string; baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean; corsBypassed?: boolean }) {
+function buildPrompt(input: { name: string; goal: string; baseUrl?: string; maxSteps?: number; hasInternetEgress?: boolean | null; corsBypassed?: boolean }) {
   return `You are running an agentic browser E2E test.\n\nTest name: ${input.name}\n\nGoal:\n${input.goal}\n\n${promptBody(input)}`;
 }
 
@@ -1115,7 +1117,7 @@ function buildResumePrompt(input: {
   goal: string;
   baseUrl?: string;
   maxSteps?: number;
-  hasInternetEgress?: boolean;
+  hasInternetEgress?: boolean | null;
   corsBypassed?: boolean;
   criticalPoints: BlopCriticalPoint[];
   actions: BlopTestResult["actions"];

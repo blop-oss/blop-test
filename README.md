@@ -129,7 +129,7 @@ needed. `bun.lock` and the retained dependency patch are part of reproducible
 repository setup; see [dependency choices and compatibility](RELEASING.md).
 
 ```bash
-bun install --frozen-lockfile --ignore-scripts
+bun install --frozen-lockfile
 bunx --no-install playwright install chromium
 bun run format:check
 bun run check:links
@@ -160,10 +160,10 @@ templates/      starter specs consumed by CLI scaffolding
 bench/          browser and agent benchmarks, not release guarantees
 ```
 
-Examples include [Example Domain](tests/example-url-open.blop.ts),
-[products](tests/elusive-products.blop.ts),
-[product detail](tests/elusive-product-detail.blop.ts), and
-[signup](tests/elusive-signup.blop.ts). Signup creates an account on a live site:
+Examples include [Example Domain](https://github.com/blop-oss/blop-test/blob/master/tests/example-url-open.blop.ts),
+[products](https://github.com/blop-oss/blop-test/blob/master/tests/elusive-products.blop.ts),
+[product detail](https://github.com/blop-oss/blop-test/blob/master/tests/elusive-product-detail.blop.ts), and
+[signup](https://github.com/blop-oss/blop-test/blob/master/tests/elusive-signup.blop.ts). Signup creates an account on a live site:
 do not run it as a default smoke check. Review permission, synthetic identities,
 cleanup, provider costs, and artifact retention; prefer controlled staging.
 Absolute URLs in specs are not redirected by `--base-url`. Spec files are
@@ -182,7 +182,7 @@ and the full retained provenance branch.
 
 Publish this package before a CLI release that requires the version from npm.
 Tags `test-v<package.json version>` trigger
-[release.yml](.github/workflows/release.yml), which first runs reusable CI, checks
+[release.yml](https://github.com/blop-oss/blop-test/blob/master/.github/workflows/release.yml), which first runs reusable CI, checks
 the tag/version match, builds and verifies the package, publishes with npm OIDC
 and provenance, and creates a GitHub release only after publishing succeeds.
 There is no long-lived npm token in that workflow. The first authorized publish,

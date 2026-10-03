@@ -69,7 +69,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun run build && bun run test:node && bun run test:e2e && bun run test:vitest",
     "test:node": "bun test test/node",
-    "test:e2e": "bun test --max-concurrency=1 test/e2e",
+    "test:e2e": "for file in test/e2e/*.test.ts; do bun test --max-concurrency=1 \"$file\" || exit $?; done",
     "test:docker": "bun test --max-concurrency=1 test/e2e/containerized-runner.test.ts",
     "test:vitest": "vitest run --config vitest.config.ts",
     "check:package": "node scripts/check-package.mjs",
@@ -77,7 +77,7 @@
     "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
-    "@blopai/browser-harness": "^0.1.5",
+    "@blopai/browser-harness": "git+https://github.com/blop-oss/blop-browser.git#86586d785e9e050c2216ab9b63a2a771bc593480",
     "@blopai/ingest": "^0.2.0",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.221.0",
@@ -117,13 +117,13 @@
       "optional": true
     }
   },
-  "patchedDependencies": {
-    "@blopai/browser-harness@0.1.5": "patches/@blopai__browser-harness@0.1.5.patch"
-  },
   "engines": {
     "node": ">=22"
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "trustedDependencies": [
+    "@blopai/browser-harness"
+  ]
 }

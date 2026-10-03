@@ -27,7 +27,7 @@ needed for containerized browser tests. No workspace or sibling build is needed.
 ```bash
 git clone https://github.com/blop-oss/blop-test.git
 cd blop-test
-bun install --frozen-lockfile --ignore-scripts
+bun install --frozen-lockfile
 bunx --no-install playwright install chromium
 ```
 
@@ -60,7 +60,7 @@ bun run test:vitest
 Complete verification before submitting:
 
 ```bash
-bun install --frozen-lockfile --ignore-scripts
+bun install --frozen-lockfile
 bun run format:check
 bun run check:links
 bun run lint
