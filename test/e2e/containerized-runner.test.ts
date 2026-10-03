@@ -68,7 +68,7 @@ describe.skipIf(!hasDocker)("containerized runner", () => {
         captureStepScreenshots: true,
       });
 
-      expect(result.status).toBe("passed");
+      expect(result.status, result.results[0]?.reason).toBe("passed");
       expect(result.results[0].reason).toBe("Sandboxed page rendered.");
       expect(result.results[0].actions.map((action) => action.name)).toEqual([
         "browser_goto",
@@ -129,7 +129,7 @@ describe.skipIf(!hasDocker)("containerized runner", () => {
         captureStepScreenshots: true,
       });
 
-      expect(result.status).toBe("passed");
+      expect(result.status, result.results[0]?.reason).toBe("passed");
       const progressLines = (await readFile(progressFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
       const frame = progressLines.find((line) => line.type === "frame");
       const liveFramePath = join(reportDir, "screenshots", result.results[0].id, "live.jpg");
