@@ -1,39 +1,60 @@
 #!/usr/bin/env bash
-# Latency measuring stick for the khadim browser agent.
-# Usage: bench/run.sh <label> [spec]
-set -uo pipefail
-ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+# Optional live benchmark. Requires reviewed targets and explicit model credentials.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 LABEL="${1:-run}"
 SPEC="${2:-bench/single.blop.ts}"
+CLI="${BLOP_CLI_BIN:-blop}"
 
-# Load agent creds from the repo .env (openrouter + configured chat model).
-set -a
-# shellcheck disable=SC1090
-source <(grep -E '^(OPENROUTER_API_KEY|CHAT_AGENT_PROVIDER|CHAT_AGENT_MODEL)=' "$ROOT/.env")
-set +a
+if [[ ! "$LABEL" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo "Label must contain only letters, digits, underscores, and hyphens." >&2
+  exit 1
+fi
+: "${BLOP_AGENT_PROVIDER:?Set an explicit provider}"
+: "${BLOP_AGENT_MODEL:?Set an explicit model}"
+: "${BLOP_AGENT_API_KEY:?Inject a provider key securely}"
+if ! command -v "$CLI" >/dev/null; then
+  echo "Install a compatible blop CLI or set BLOP_CLI_BIN to its executable." >&2
+  exit 1
+fi
+if [[ ! -f "$SPEC" ]]; then
+  echo "Reviewed spec does not exist: $SPEC" >&2
+  exit 1
+fi
 
-export BLOP_AGENT_PROVIDER="${CHAT_AGENT_PROVIDER:-openrouter}"
-export BLOP_AGENT_MODEL="${CHAT_AGENT_MODEL:-nvidia/nemotron-nano-9b-v2:free}"
-export BLOP_AGENT_API_KEY="${OPENROUTER_API_KEY}"
-
-PROG="bench/progress-$LABEL.ndjson"
+PROGRESS="bench/progress-$LABEL.ndjson"
 REPORT="bench/report-$LABEL"
-rm -f "$PROG"
+LOG="bench/stdout-$LABEL.log"
+for output in "$PROGRESS" "$REPORT" "$LOG"; do
+  if [[ -e "$output" ]]; then
+    echo "Refusing to overwrite evidence: $output. Choose a new label." >&2
+    exit 1
+  fi
+done
 
-START=$(date +%s.%N)
-bun run "$ROOT/packages/blop/src/cli/index.ts" flow test "$SPEC" \
+START=$SECONDS
+if "$CLI" flow test "$SPEC" \
   --capture-screenshots \
-  --progress-file "$PROG" \
+  --progress-file "$PROGRESS" \
   --report-dir "$REPORT" \
   --max-steps 40 \
-  >"bench/stdout-$LABEL.log" 2>&1
-CODE=$?
-END=$(date +%s.%N)
-
-WALL=$(echo "$END - $START" | bc)
-ACTIONS=$(grep -c '"type":"action"' "$PROG" 2>/dev/null || echo 0)
-echo "----- $LABEL -----"
-echo "exit_code=$CODE"
-printf "wall_seconds=%.2f\n" "$WALL"
-echo "actions=$ACTIONS"
-tail -3 "bench/stdout-$LABEL.log"
+  >"$LOG" 2>&1; then
+  CODE=0
+else
+  CODE=$?
+fi
+printf 'label=%s\nexit_code=%s\nwall_seconds=%s\n' "$LABEL" "$CODE" "$((SECONDS - START))"
+node --input-type=module - "$PROGRESS" <<'NODE'
+import { existsSync, readFileSync } from "node:fs";
+const path = process.argv[2];
+if (!existsSync(path)) {
+  console.log("actions=unavailable (no progress evidence produced)");
+} else {
+  const lines = readFileSync(path, "utf8").split("\n").filter((line) => line.trim());
+  const events = lines.map((line) => JSON.parse(line));
+  console.log(`actions=${events.filter((event) => event.type === "action").length}`);
+}
+NODE
+printf 'progress=%s\nreport=%s\nstdout=%s\n' "$PROGRESS" "$REPORT" "$LOG"
+exit "$CODE"

@@ -39,21 +39,41 @@
     },
     "./templates/basic.blop.ts": "./templates/basic.blop.ts"
   },
-  "files": ["dist", "templates", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "PRIVACY.md",
+    "SECURITY.md",
+    "RELEASING.md",
+    "LICENSE"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/blop-oss/blop-app.git",
-    "directory": "packages/test"
+    "url": "git+https://github.com/blop-oss/blop-test.git"
   },
-  "homepage": "https://github.com/blop-oss/blop-app/tree/main/packages/test#readme",
-  "bugs": { "url": "https://github.com/blop-oss/blop-app/issues" },
+  "homepage": "https://github.com/blop-oss/blop-test#readme",
+  "bugs": {
+    "url": "https://github.com/blop-oss/blop-test/issues"
+  },
+  "packageManager": "bun@1.3.13",
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
+    "format": "prettier --write '*.md' 'bench/*.md' 'test/**/*.md' '.github/**/*.{md,yml,yaml}' 'scripts/**/*.mjs' '*.json' .oxlintrc.json",
+    "format:check": "prettier --check '*.md' 'bench/*.md' 'test/**/*.md' '.github/**/*.{md,yml,yaml}' 'scripts/**/*.mjs' '*.json' .oxlintrc.json",
+    "check:links": "node scripts/check-markdown-links.mjs",
+    "lint": "oxlint src test scripts --deny-warnings",
     "typecheck": "tsc --noEmit",
-    "test": "bun run build && bun test test/node && bun test --max-concurrency=1 test/e2e",
+    "test": "bun run build && bun run test:node && bun run test:e2e && bun run test:vitest",
+    "test:node": "bun test test/node",
+    "test:e2e": "bun test --max-concurrency=1 test/e2e",
+    "test:docker": "bun test --max-concurrency=1 test/e2e/containerized-runner.test.ts",
     "test:vitest": "vitest run --config vitest.config.ts",
-    "clean": "rm -rf dist .blop",
+    "check:package": "node scripts/check-package.mjs",
+    "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
@@ -79,7 +99,9 @@
   "devDependencies": {
     "@types/node": "^22.15.18",
     "camoufox-js": "0.11.1",
+    "oxlint": "1.78.0",
     "playwright-core": "1.61.1",
+    "prettier": "3.9.6",
     "typescript": "^5.8.3",
     "vitest": "3.2.6"
   },
@@ -88,9 +110,20 @@
     "playwright-core": "1.61.1"
   },
   "peerDependenciesMeta": {
-    "camoufox-js": { "optional": true },
-    "playwright-core": { "optional": true }
+    "camoufox-js": {
+      "optional": true
+    },
+    "playwright-core": {
+      "optional": true
+    }
   },
-  "engines": { "node": ">=22" },
-  "publishConfig": { "access": "public" }
+  "patchedDependencies": {
+    "@blopai/browser-harness@0.1.5": "patches/@blopai__browser-harness@0.1.5.patch"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

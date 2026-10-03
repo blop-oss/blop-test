@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "eslint/no-debugger": "error",
+    "eslint/no-dupe-keys": "error",
+    "eslint/no-duplicate-case": "error",
+    "eslint/no-self-assign": "error",
+    "eslint/no-unreachable": "error",
+    "eslint/no-unsafe-finally": "error",
+    "eslint/valid-typeof": "error"
+  }
+}

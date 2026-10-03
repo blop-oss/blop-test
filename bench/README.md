@@ -1,64 +1,74 @@
-# Khadim agent latency — measuring stick
+# Browser-agent latency benchmarks
 
-Quantifies the streaming work: replacing the blocking per-action PNG/JPEG
-screenshot with a live CDP screencast so the host always has the latest view and
-actions stay off the screenshot critical path.
+These assets investigate per-action screenshot overhead, screencast throughput,
+and model-bound wall-clock behavior. They are not release gates or guarantees.
+Historical timing numbers without a reproducible current run record are not
+standalone performance claims. Keep all repetitions, failures, versions, browser
+settings, and limitations when publishing a new measurement.
 
-The end-to-end wall-clock of an agent run is dominated by **LLM latency** (with
-the configured free model, 7–36s per step), which this change does not touch.
-So the honest sticks below isolate exactly what changed — the browser/streaming
-path — with no model calls.
+Run from the standalone repository root after:
 
-Run these commands from `packages/test` after installing dependencies with
-`pnpm install` at the repository root. Browser/runner assets live in this package;
-`run.sh` invokes the CLI entry point in `packages/blop`.
+```bash
+bun install --frozen-lockfile --ignore-scripts
+bun run build
+bunx --no-install playwright install chromium
+```
 
-## 1. Per-action screenshot overhead (`micro.ts`)
-
-No LLM. Compares the cost each browser action pays for its visual.
+## Per-action screenshot overhead
 
 ```bash
 bun run bench/micro.ts
 ```
 
-Measured (chromium, headless, example.com, 1280×800):
+`micro.ts` compares blocking JPEG screenshots against writing the latest CDP
+screencast frame. It uses no model, but navigates to `https://example.com`, so it
+is not an offline deterministic fixture. Review network access before running.
+The script writes JPEG measurements under the OS temporary directory; delete
+those artifacts according to your retention policy.
 
-| Approach | Cost per action |
-|----------|-----------------|
-| Before — blocking `page.screenshot({jpeg,q45})` | **~38 ms** |
-| After — write in-memory screencast frame | **~0.1 ms** |
-
-~38 ms removed from every action's critical path (far more on heavy pages, where
-a synchronous screenshot can block for hundreds of ms).
-
-## 2. Live-view throughput through the real runner (`stream-e2e.ts`)
-
-No LLM — drives the **real `runBlopTests` runner** with a mock agent stream
-against a locally-served animated page, then reads the same progress NDJSON the
-web app (`web-sk`) consumes.
+## Real-runner streaming throughput
 
 ```bash
 bun run bench/stream-e2e.ts
 ```
 
-Measured:
+This drives `runBlopTests` with a mocked model stream against a locally served
+animated page, then reads progress NDJSON to measure frames and action evidence.
+No provider credentials are needed. Build first so the package self-import
+resolves. Generated progress/report evidence is ignored, not automatically
+redacted or deleted. A model-free benchmark is not proof of live-agent task
+correctness.
 
-- 5 actions, **all step screenshots served from frames** (~0.1 ms each)
-- **~8.5 live frames/sec** pushed to the host (≈150 raw frames captured
-  internally over ~2.9s, throttled to one progress line per 100 ms)
+## Provider-backed authored smoke
 
-Before, the host only received **one image per action** — five total — each
-gated behind a blocking screenshot, with the view frozen for the seconds the LLM
-spends thinking between actions. After, the host gets a continuous stream and
-the per-action capture is effectively free.
+`run.sh` delegates to an explicitly installed `blop` CLI executable, not a sibling
+checkout or an internal source path. Install a CLI version compatible with the
+library in the project running the check, and point `BLOP_CLI_BIN` at its binary
+if it is not already on `PATH`. Before npm publication, maintainers must use an
+actual built/pinned source dependency in that project rather than pretending an
+unpublished registry version resolves. This library does not install the CLI.
 
-## 3. End-to-end smoke (`run.sh`, uses the LLM)
+Inject `BLOP_AGENT_PROVIDER`, `BLOP_AGENT_MODEL`, and `BLOP_AGENT_API_KEY` securely;
+provider-native keys need explicit mapping. Optionally set `BLOP_AGENT_BASE_URL`
+for an OpenAI-compatible endpoint. The script does not source `.env`, invent a
+model, or automatically map chat settings. After reviewing authorization, costs,
+spec imports, and absolute destinations, run:
 
 ```bash
-bash bench/run.sh mylabel              # runs bench/single.blop.ts
+bash bench/run.sh reviewed-example
 ```
 
-Sources `OPENROUTER_API_KEY` + `CHAT_AGENT_*` from the repo `.env`, runs the CLI
-with `--capture-screenshots --progress-file`, and prints wall time + action
-count. Use to confirm the run still passes and frames stream; wall-clock is
-LLM-bound and noisy, so prefer sticks 1–2 for the streaming improvement.
+The default spec is `bench/single.blop.ts`, which asks the agent to visit Example
+Domain. An optional second argument selects another reviewed spec. The wrapper
+uses a 40-step bound, captures screenshot/progress evidence, preserves the CLI's
+exit status, prints elapsed seconds/action count, and refuses to overwrite an
+existing label's evidence. Wall-clock includes model/network latency; pin settings
+and compare repeated complete runs rather than the fastest result.
+
+Do not select live signup, purchase, messaging, account changes, or destructive
+flows without explicit permission, synthetic identities, cleanup, and retention
+review. `tests/elusive-signup.blop.ts` changes a live account state and is not a
+routine smoke test. Absolute URLs are not redirected by CLI `--base-url`.
+Follow [PRIVACY.md](../PRIVACY.md), preserve every failure/error, and distinguish a
+clean first-attempt pass from a pass after retry. No authored example is asserted
+to pass merely because the repository CI passes.

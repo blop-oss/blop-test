@@ -1,0 +1,72 @@
+name: Release @blopai/test
+
+# Requires an initial authorized npm publication and a trusted publisher configured
+# for blop-oss/blop-test, workflow release.yml. See RELEASING.md.
+on:
+  push:
+    tags:
+      - "test-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Install trusted-publishing-compatible npm
+        run: npm install --global npm@11.5.1
+
+      - name: Verify tag matches package version
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#test-v}"
+          echo "package.json: $PKG_VERSION"
+          echo "git tag:      $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Install dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Clean and build
+        run: bun run clean && bun run build
+
+      - name: Verify npm package exports and contents
+        run: bun run check:package
+
+      - name: Publish to npm with OIDC and provenance
+        run: npm publish --access public --provenance
+        # No NODE_AUTH_TOKEN. npm exchanges the GitHub Actions identity for a
+        # short-lived publish credential only after trusted publishing is configured.
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "@blopai/test ${{ github.ref_name }}"
+          generate_release_notes: true
