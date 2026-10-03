@@ -23,6 +23,8 @@ const globalRegistry = globalThis as typeof globalThis & {
 
 const registeredTests = globalRegistry[registryKey] ??= [];
 const describeStack = globalRegistry[describeStackKey] ??= [];
+let specImportSequence = 0;
+const registeredBySpec = new Map<string, { module: unknown; tests: RegisteredAgentTest[] }>();
 
 export function defineAgentTest(test: BlopAgentTest): BlopAgentTest {
   return agentTestSchema.parse(test);
@@ -46,16 +48,33 @@ export function agentTest(name: string, handler: BlopAgentTestHandler): void {
 
 export async function loadAgentTests(specFile: string): Promise<BlopAgentTest[]> {
   const startIndex = registeredTests.length;
-  const mod = await import(pathToFileURL(specFile).href);
-  const exported = mod.default ?? mod.tests;
-
-  if (exported) {
-    const tests = Array.isArray(exported) ? exported : [exported];
-    return tests.map((test) => agentTestSchema.parse(test));
+  const url = pathToFileURL(specFile);
+  // The spec is runtime-selected; a fresh URL reloads authored code under Node.
+  url.searchParams.set("blopLoad", String(++specImportSequence));
+  const mod = await import(url.href);
+  let registered = registeredTests.splice(startIndex);
+  const cached = registeredBySpec.get(specFile);
+  // Bun may return the same module despite a new query; retain that module's DSL handlers.
+  if (cached && cached.module === mod && registered.length === 0) registered = cached.tests;
+  else registeredBySpec.set(specFile, { module: mod, tests: registered });
+  const tests = await Promise.all(registered.map(materializeRegisteredTest));
+  const seen = new Set<unknown>();
+  const add = (value: unknown) => {
+    if (seen.has(value)) return;
+    seen.add(value);
+    tests.push(agentTestSchema.parse(value));
+  };
+  for (const key of ["default", "tests"]) {
+    const value = mod[key];
+    if (value === undefined) continue;
+    if (Array.isArray(value)) value.forEach(add);
+    else add(value);
   }
-
-  const tests = registeredTests.slice(startIndex);
-  return Promise.all(tests.map(materializeRegisteredTest));
+  for (const [key, value] of Object.entries(mod)) {
+    if (key === "default" || key === "tests" || !Array.isArray(value)) continue;
+    if (value.every(test => test !== null && typeof test === "object" && "name" in test && "goal" in test)) value.forEach(add);
+  }
+  return tests;
 }
 
 async function materializeRegisteredTest(test: RegisteredAgentTest): Promise<BlopAgentTest> {

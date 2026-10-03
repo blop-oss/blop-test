@@ -1,27 +1,181 @@
-import type { BlopRunResult } from "../runtime/types.js";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { execSync } from "node:child_process";
+import type { BlopRunResult, BlopTestResult } from "../runtime/types.js";
+import { createIngestClient, isFlakyResult, type ArtifactPointer, type Counts, type TopFailure, type TestCaseResult, type CiMetadata } from "@blopai/ingest";
+import { signalsFromTestResult } from "../reporters/failure-evidence.js";
 
-export async function uploadRunToPlatform(options: {
-  platformUrl?: string;
-  apiKey?: string;
-  result: BlopRunResult;
-}) {
-  if (!options.platformUrl || !options.apiKey) {
-    return { uploaded: false, reason: "platform_not_configured" } as const;
-  }
+export type UploadOptions = {
+  /** Base URL of the blop web app serving /api/ingest. */
+  ingestUrl?: string;
+  /** Per-project ingest secret. */
+  ingestSecret?: string;
+  /** Project id the run belongs to. */
+  projectId?: string;
+  /** Run id (defaults to the BlopRunResult.runId). */
+  runId?: string;
+  /** Trigger source. */
+  trigger?: string;
+  /** Report directory to zip as a report_bundle artifact. */
+  reportDir?: string;
+  /** Skip artifact upload (e.g. when R2 is not configured). */
+  skipArtifacts?: boolean;
+  /** W3C context that correlates platform ingest with the runner trace. */
+  traceparent?: string;
+  tracestate?: string;
+};
 
-  const response = await fetch(new URL("/api/runs/ingest", options.platformUrl), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${options.apiKey}`,
-    },
-    body: JSON.stringify(options.result),
+/**
+ * Upload a BlopRunResult to the Blop platform via CloudEvents.
+ *
+ * Replaces the legacy single-POST upload with the CloudEvents ingest
+ * protocol (qa.run.started.v1 + qa.run.finished.v1 + presigned artifacts),
+ * sharing the same wire contract as every other test runner adapter.
+ *
+ * Best-effort: errors are thrown to the caller, which should catch and log.
+ * Returns the run id and uploaded artifact pointers.
+ */
+export async function uploadRunToPlatform(options: UploadOptions & { result: BlopRunResult }): Promise<{
+  uploaded: boolean;
+  reason?: string;
+  runId?: string;
+  artifacts?: ArtifactPointer[];
+}> {
+  const { result, reportDir, skipArtifacts } = options;
+
+  const client = createIngestClient({
+    ingestUrl: options.ingestUrl,
+    ingestSecret: options.ingestSecret,
+    projectId: options.projectId,
+    // BLOP_RUN_ID before the runner's own id: when CI dispatched this run, the
+    // platform already has a row for it and uploading under a fresh uuid would
+    // create a second, orphaned run rather than attaching to the dispatched
+    // one. resolveConfig's env fallback can never win here, because
+    // result.runId is always set (#370).
+    runId: options.runId ?? process.env.BLOP_RUN_ID ?? result.runId,
+    trigger: options.trigger,
+    adapter: "blop",
+    traceparent: options.traceparent,
+    tracestate: options.tracestate,
   });
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Blop Platform upload failed: ${response.status} ${body}`.trim());
+  if (!client) {
+    return { uploaded: false, reason: "platform_not_configured" };
   }
 
-  return { uploaded: true } as const;
+  const ci = toCiMetadata(result.results[0]?.ci);
+  const counts = computeCounts(result.results);
+  const topFailures = extractFailures(result.results);
+  const tests = toTestResults(result.results);
+  const status = result.status === "passed" ? "passed" : "failed";
+
+  await client.emitStarted();
+
+  const artifacts: ArtifactPointer[] = [];
+
+  if (!skipArtifacts && reportDir && existsSync(reportDir)) {
+    const bundle = zipReportDir(reportDir);
+    if (bundle) {
+      const uploadResult = await client.uploadArtifact({
+        filename: "blop-report-bundle.zip",
+        contentType: "application/zip",
+        bytes: bundle,
+      });
+      if (uploadResult.uploaded && uploadResult.artifact) {
+        artifacts.push(uploadResult.artifact);
+      }
+    }
+  }
+
+  await client.emitFinished({
+    status,
+    counts,
+    durationMs: result.durationMs,
+    topFailures,
+    tests,
+    artifacts,
+    ci,
+  });
+
+  return { uploaded: true, runId: client.runId, artifacts };
+}
+
+function computeCounts(results: BlopTestResult[]): Counts {
+  let passed = 0;
+  let failed = 0;
+  let skipped = 0;
+  let flaky = 0;
+  for (const test of results) {
+    if (test.status === "passed") passed++;
+    else if (test.status === "failed" || test.status === "error") failed++;
+    // Synthetic records are counted above on purpose (they are real run
+    // failures) but never get a test identity, so they cannot be flaky.
+    if (
+      !test.synthetic &&
+      isFlakyResult({
+        status: test.status,
+        attempts: test.attempts,
+        first_status: test.firstAttemptStatus ?? undefined,
+      })
+    ) {
+      flaky++;
+    }
+  }
+  return { passed, failed, skipped, flaky };
+}
+
+function extractFailures(results: BlopTestResult[]): TopFailure[] {
+  const failures: TopFailure[] = [];
+  for (const test of results) {
+    if (test.status === "passed") continue;
+    const testFile = test.name || "unknown";
+    const message = test.reason || `${test.name} ${test.status}`;
+    // #369: bounded evidence signals travel with the failure the cluster is
+    // built from, so the platform never needs to join back to `tests[]`.
+    const { signals, failingTool } = signalsFromTestResult(test);
+    const failure: TopFailure = { test_file: testFile, message };
+    if (failingTool) failure.failing_tool = failingTool;
+    if (signals.length) failure.signals = signals;
+    failures.push(failure);
+  }
+  return failures;
+}
+
+function toTestResults(results: BlopTestResult[]): TestCaseResult[] {
+  const tests: TestCaseResult[] = [];
+  for (const test of results) {
+    if (test.synthetic) continue;
+    const entry: TestCaseResult = {
+      suite: "blop",
+      classname: test.specFile ?? "",
+      name: test.name,
+      status: test.status,
+      duration_ms: test.durationMs,
+    };
+    if (test.attempts > 1) entry.attempts = test.attempts;
+    if (test.firstAttemptStatus) entry.first_status = test.firstAttemptStatus;
+    if (test.resumes > 0) entry.resumes = test.resumes;
+    if (test.status !== "passed" && test.reason) entry.message = test.reason;
+    tests.push(entry);
+  }
+  return tests;
+}
+
+function toCiMetadata(ci?: { provider: string | null; runId: string | null; branch: string | null; commitSha: string | null }): CiMetadata | undefined {
+  if (!ci || !ci.provider) return undefined;
+  const out: CiMetadata = {};
+  if (ci.branch) out.branch = ci.branch;
+  if (ci.commitSha) out.commit_sha = ci.commitSha;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function zipReportDir(reportDir: string): Uint8Array | null {
+  try {
+    const tmpZip = join(reportDir, "..blop-report-bundle.zip");
+    execSync(`zip -qr "${tmpZip}" .`, { cwd: reportDir });
+    const buf = readFileSync(tmpZip);
+    return new Uint8Array(buf);
+  } catch {
+    return null;
+  }
 }

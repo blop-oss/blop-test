@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.blop/
+.blop-test-screenshots*/
+.env
+.env.*
+*.log
+*.tgz
+.DS_Store
+bench/progress-*.ndjson
+bench/report-*/
+bench/stdout-*.log
+*.tmp.ts
+*.tmp.blop.ts

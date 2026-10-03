@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security reporting policy
+    url: https://github.com/blop-oss/blop-test/blob/master/SECURITY.md
+    about: Read the private reporting process and its repository setup requirements; do not disclose vulnerabilities publicly.

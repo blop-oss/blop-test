@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible problem in the Blop testing library.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove keys, tokens, cookies, private URLs, CDP secrets, authenticated
+        state, personal data, and raw reports. Security problems belong in
+        SECURITY.md's private process, not this public form.
+  - type: input
+    id: version
+    attributes:
+      label: Package version or source commit
+      description: Include @blopai/test, browser-harness, and CLI versions if relevant.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, Node/Bun, browser/session mode, and Docker if relevant.
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model, if relevant
+      description: Identify the provider/model without keys or private endpoints; say whether agentStream was mocked.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Reviewed spec, sanitized configuration, and exact commands using synthetic data.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and evidence
+      description: Distinguish failed goals from runtime errors, first attempts from retries/resumes, and tests run from skipped.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed secrets, private application data, and authenticated state.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

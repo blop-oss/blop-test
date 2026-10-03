@@ -1,0 +1,52 @@
+name: Support question
+description: Ask a public setup or usage question about the testing library.
+title: "[Support]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is public. Remove credentials, private URLs, CDP secrets,
+        authenticated state, personal data, and raw reports. Follow SECURITY.md
+        for possible vulnerabilities; do not include sensitive details here.
+  - type: input
+    id: version
+    attributes:
+      label: Package versions or source commit
+      description: Include @blopai/test, browser-harness, CLI, Node, and Bun versions as relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - Standalone installation or build
+        - Spec authoring or configuration
+        - Provider or browser execution
+        - Reports, coverage, or evidence
+        - OpenTelemetry or upload
+        - CLI integration
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain the intended outcome and where you are blocked.
+    validations:
+      required: true
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Include sanitized commands, configuration, and observed errors/skips.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I removed secrets, authenticated state, and private data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

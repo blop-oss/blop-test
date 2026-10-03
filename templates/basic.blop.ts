@@ -1,4 +1,4 @@
-import { agentTest, describe } from "../src/index";
+import { agentTest, describe } from "@blopai/test";
 
 describe("homepage", () => {
   agentTest("loads and exposes a primary action", async ({ agent }) => {
