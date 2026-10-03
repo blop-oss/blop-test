@@ -1,4 +1,4 @@
-import { agentTest, describe } from "@blopai/cli";
+import { agentTest, describe } from "@blopai/test";
 
 describe("elusive.dk", () => {
   agentTest("navigates to products page", async ({ agent }) => {

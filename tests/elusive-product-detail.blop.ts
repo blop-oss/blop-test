@@ -1,4 +1,4 @@
-import { agentTest, describe } from "@blopai/cli";
+import { agentTest, describe } from "@blopai/test";
 
 // Full product discovery → detail flow for elusive.dk.
 //

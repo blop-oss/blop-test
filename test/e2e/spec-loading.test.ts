@@ -58,6 +58,22 @@ describe("agent spec loading", () => {
     ]);
   });
 
+  test("loads mixed DSL, default and named-array checks once each and reloads them on a later run", async () => {
+    const temp = await createTempDir();
+    cleanup = temp.cleanup;
+    const specFile = await writeSpec(temp.dir, "mixed.blop.ts", `
+      import { agentTest, defineAgentTest } from ${sourceImport};
+      agentTest("registered check", async ({ agent }) => { await agent.goal("Assert rendered heading."); });
+      const objectCheck = defineAgentTest({name:"object check",goal:"Assert the title."});
+      export default objectCheck;
+      export const tests = [objectCheck];
+      export const moreTests = [defineAgentTest({name:"named-array check",goal:"Assert the URL."})];
+    `);
+    const expected = ["registered check", "object check", "named-array check"];
+    expect((await loadAgentTests(specFile)).map(test => test.name)).toEqual(expected);
+    expect((await loadAgentTests(specFile)).map(test => test.name)).toEqual(expected);
+  });
+
   test("keeps relative test paths usable in output", async () => {
     const temp = await createTempDir();
     cleanup = temp.cleanup;

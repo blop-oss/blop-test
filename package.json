@@ -1,0 +1,96 @@
+{
+  "name": "@blopai/test",
+  "version": "0.1.0",
+  "description": "Agent-driven browser E2E tests, local artifacts, and OpenTelemetry reporters for Blop.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./agent-loop": {
+      "types": "./dist/runtime/agent-loop.d.ts",
+      "default": "./dist/runtime/agent-loop.js"
+    },
+    "./config": {
+      "types": "./dist/node/config.d.ts",
+      "default": "./dist/node/config.js"
+    },
+    "./coverage": {
+      "types": "./dist/coverage.d.ts",
+      "default": "./dist/coverage.js"
+    },
+    "./reporters": {
+      "types": "./dist/reporters/index.d.ts",
+      "default": "./dist/reporters/index.js"
+    },
+    "./reporters/*": {
+      "types": "./dist/reporters/*.d.ts",
+      "default": "./dist/reporters/*.js"
+    },
+    "./platform": {
+      "types": "./dist/platform/upload.d.ts",
+      "default": "./dist/platform/upload.js"
+    },
+    "./otel-config": {
+      "types": "./dist/node/otel-config.d.ts",
+      "default": "./dist/node/otel-config.js"
+    },
+    "./templates/basic.blop.ts": "./templates/basic.blop.ts"
+  },
+  "files": ["dist", "templates", "README.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blop-oss/blop-app.git",
+    "directory": "packages/test"
+  },
+  "homepage": "https://github.com/blop-oss/blop-app/tree/main/packages/test#readme",
+  "bugs": { "url": "https://github.com/blop-oss/blop-app/issues" },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run build && bun test test/node && bun test --max-concurrency=1 test/e2e",
+    "test:vitest": "vitest run --config vitest.config.ts",
+    "clean": "rm -rf dist .blop",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "@blopai/browser-harness": "^0.1.5",
+    "@blopai/ingest": "^0.2.0",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.221.0",
+    "@opentelemetry/core": "^2.10.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-proto": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-trace-node": "^2.10.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0",
+    "playwright": "1.61.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "camoufox-js": "0.11.1",
+    "playwright-core": "1.61.1",
+    "typescript": "^5.8.3",
+    "vitest": "3.2.6"
+  },
+  "peerDependencies": {
+    "camoufox-js": "0.11.1",
+    "playwright-core": "1.61.1"
+  },
+  "peerDependenciesMeta": {
+    "camoufox-js": { "optional": true },
+    "playwright-core": { "optional": true }
+  },
+  "engines": { "node": ">=22" },
+  "publishConfig": { "access": "public" }
+}

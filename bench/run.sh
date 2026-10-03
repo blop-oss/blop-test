@@ -21,7 +21,7 @@ REPORT="bench/report-$LABEL"
 rm -f "$PROG"
 
 START=$(date +%s.%N)
-bun run blop test "$SPEC" \
+bun run "$ROOT/packages/blop/src/cli/index.ts" flow test "$SPEC" \
   --capture-screenshots \
   --progress-file "$PROG" \
   --report-dir "$REPORT" \

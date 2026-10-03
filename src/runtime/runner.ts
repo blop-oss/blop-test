@@ -10,7 +10,7 @@ import {
 } from "@blopai/browser-harness";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, writeFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import type { Browser, BrowserContextOptions, Page } from "playwright";
 import { getCiMetadata } from "../node/ci.js";
@@ -24,6 +24,7 @@ import { createStepFramePublisher } from "./live-frame-fallback.js";
 import { loadAgentTests } from "./spec.js";
 import type { BlopAction, BlopAgentEvent, BlopAgentTest, BlopBrowserLog, BlopCriticalPoint, BlopRunOptions, BlopRunResult, BlopScreenshot, BlopTestResult, BlopTestStatus } from "./types.js";
 import { signalsFromTestResult } from "../reporters/failure-evidence.js";
+import { BrowserCoverageCollector, validateTestCoverageReport } from "../coverage.js";
 
 // There is no default step cap: the agent keeps working until it calls
 // finish_test, the test times out, or the stall guard below trips. An explicit
@@ -58,6 +59,22 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   if (specFiles.length === 0) {
     throw new Error("No Blop spec files were provided.");
   }
+  if (options.coverage && (options.browser ?? "chromium") !== "chromium") {
+    throw new Error("JavaScript code coverage requires the Chromium browser.");
+  }
+  if (options.coverageEndpoint && !options.coverage) {
+    throw new Error("coverageEndpoint requires coverage: true (CLI: --coverage).");
+  }
+  let coverageUrl: URL | null = null;
+  if (options.coverageEndpoint) {
+    coverageUrl = new URL(options.coverageEndpoint);
+    if (!["http:", "https:"].includes(coverageUrl.protocol) || coverageUrl.username || coverageUrl.password || coverageUrl.search || coverageUrl.hash) {
+      throw new Error("coverageEndpoint must be an HTTP(S) collector URL without credentials, query or fragment.");
+    }
+    coverageUrl.pathname = coverageUrl.pathname.replace(/\/$/, "") + "/api/test-coverage";
+  }
+  const coverage = options.coverage ? new BrowserCoverageCollector() : null;
+  const coverageTests = coverage ? new Map<string, { id: string; name: string; status: BlopTestStatus }>() : null;
 
   // A uuid, not createId("run"): this id is uploaded as data.run_id and
   // becomes runs.id, a uuid column on the platform.
@@ -139,6 +156,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
   let corsBypassed = false;
   const runOneTest = async (test: BlopAgentTest): Promise<BlopTestResult> => {
     const testId = createId("test");
+    coverageTests?.set(testId, { id: testId, name: test.name, status: "error" });
     const screenshotsDir = join(reportDir, "screenshots", testId);
     const otelScenario: BlopOtelScenarioSpan | null =
       otelRun?.startScenario({
@@ -241,6 +259,11 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       }
 
       const page = await context.newPage();
+      const coveragePages: { page: Page; started: Promise<boolean> }[] = [];
+      if (coverage) {
+        const started = await coverage.start(page);
+        coveragePages.push({ page, started: Promise.resolve(started) });
+      }
       // Registry of every page/tab in this context. The main page is index 0;
       // popups opened by the app via window.open / target=_blank are appended
       // in open order. The tab tools (browser_list_pages /
@@ -251,6 +274,10 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       const attachPageListeners = (popup: Page) => {
         pages.push(popup);
         attachBrowserLogListeners(popup, browserLogs, attempt);
+        if (coverage) {
+          coverage.warn("Popup coverage starts after the page opens; its initial scripts may be absent.");
+          coveragePages.push({ page: popup, started: coverage.start(popup) });
+        }
         popup.on("close", () => {
           const index = pages.indexOf(popup);
           if (index >= 0) pages.splice(index, 1);
@@ -573,6 +600,9 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       } finally {
         if (timeout) clearTimeout(timeout);
         await stepFramePublisher?.flush();
+        for (const captured of coveragePages) {
+          if (await captured.started) await coverage?.stop(captured.page, testId);
+        }
         try {
           context.off("page", attachPageListeners);
         } catch {
@@ -623,6 +653,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
       reason,
       timestamp: testFinishedAt.toISOString(),
     });
+    coverageTests?.set(testId, { id: testId, name: test.name, status });
     return {
       id: testId,
       name: test.name,
@@ -767,10 +798,28 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     results,
   };
 
+  if (!coverage) await rm(join(reportDir, "coverage.json"), { force: true });
   try {
     await writeReports(reportDir, result, options.reporter ?? "all");
   } catch (error) {
     console.error(`Failed to write reports: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let coverageReport = null;
+  if (coverage && coverageTests) {
+    for (const test of results) coverageTests.set(test.id, { id: test.id, name: test.name, status: test.status });
+    if (runError) coverage.warn(`Run ended early: ${runError}. Completed coverage is retained; unfinished tests are errors.`);
+    coverageReport = validateTestCoverageReport({
+      schemaVersion: 1,
+      runId,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      browser: "chromium",
+      tests: [...coverageTests.values()],
+      files: coverage.files,
+      warnings: coverage.warnings,
+    });
+    await mkdir(reportDir, { recursive: true });
+    await writeFile(join(reportDir, "coverage.json"), JSON.stringify(coverageReport, null, 2));
   }
 
   try {
@@ -802,6 +851,15 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
     console.error(
       `Failed to finish OpenTelemetry export: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+  if (coverageUrl && coverageReport) {
+    const response = await fetch(coverageUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(coverageReport),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`Coverage report saved locally, but collector rejected it (HTTP ${response.status}).`);
   }
 
   return result;

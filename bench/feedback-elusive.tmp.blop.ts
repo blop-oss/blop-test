@@ -1,4 +1,4 @@
-import { defineAgentTest } from "@blopai/cli";
+import { defineAgentTest } from "@blopai/test";
 
 // Mirrors web-sk's no-GitHub site-feedback run (DEFAULT_FEEDBACK_GOAL in
 // apps/web-sk/src/lib/server/projects/feedback.ts) against elusive.dk, to

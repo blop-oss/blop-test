@@ -9,6 +9,10 @@ the configured free model, 7–36s per step), which this change does not touch.
 So the honest sticks below isolate exactly what changed — the browser/streaming
 path — with no model calls.
 
+Run these commands from `packages/test` after installing dependencies with
+`pnpm install` at the repository root. Browser/runner assets live in this package;
+`run.sh` invokes the CLI entry point in `packages/blop`.
+
 ## 1. Per-action screenshot overhead (`micro.ts`)
 
 No LLM. Compares the cost each browser action pays for its visual.

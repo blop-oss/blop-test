@@ -1,4 +1,4 @@
-import { agentTest, describe } from "@blopai/cli";
+import { agentTest, describe } from "@blopai/test";
 
 // Reproduces the reported "account creation doesn't work" flow on elusive.dk.
 // The /login page has a "Create account" mode whose form requires Name + Email

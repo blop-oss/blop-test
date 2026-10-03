@@ -1066,7 +1066,7 @@ describe("module graph", () => {
   test("the runner does not statically import the OpenTelemetry SDK", async () => {
     // The docs promise the SDK is never loaded without a configured endpoint,
     // and a static import would also drag it into every consumer of the
-    // package, including `await import("@blopai/cli")` in the web app.
+    // package, including `await import("@blopai/test")` in the web app.
     const source = await Bun.file(new URL("../../src/runtime/runner.ts", import.meta.url)).text();
 
     const staticOtelImport = /^import\s+(?!type\b)[^;]*from\s+["'][^"']*(?:@opentelemetry|reporters\/otel)/m;

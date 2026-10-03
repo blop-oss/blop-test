@@ -4,8 +4,8 @@
 // progress NDJSON the host (web-sk) consumes.
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { runBlopTests } from "../src/runtime/runner.ts";
-import type { BlopAgentStreamRunner } from "../src/runtime/types.ts";
+import { runBlopTests } from "@blopai/test";
+import type { BlopAgentStreamRunner } from "@blopai/test";
 
 const HTML = `<!doctype html><html><head><style>
   @keyframes spin { from { transform: rotate(0) } to { transform: rotate(360deg) } }

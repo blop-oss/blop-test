@@ -1,4 +1,4 @@
-import { agentTest, defineAgentTest, describe } from "@blopai/cli";
+import { agentTest, defineAgentTest, describe } from "@blopai/test";
 
 // Example 1: Using the describe/agentTest DSL — the agent will
 // call browser_goto to open the URL, then carry out the goal.

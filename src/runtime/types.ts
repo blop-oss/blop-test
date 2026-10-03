@@ -62,6 +62,10 @@ export type BlopRunOptions = {
   specFiles?: string[];
   baseUrl?: string;
   reportDir?: string;
+  /** Collect executed JavaScript source ranges in Chromium into coverage.json. */
+  coverage?: boolean;
+  /** Explicit collector base URL to receive the coverage report (requires coverage). */
+  coverageEndpoint?: string;
   /**
    * Append-only NDJSON file the runner writes live progress to (one JSON object
    * per line: test_start, action, test_finish). Lets a host process tail agent
