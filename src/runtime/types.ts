@@ -1,4 +1,5 @@
 import type { BrowserContextOptions } from "playwright";
+import type { BlopEvidence } from "../reporters/otel-attributes.js";
 
 export type BlopTestStatus = "passed" | "failed" | "error";
 
@@ -58,6 +59,8 @@ export type BlopAgentTestContext = {
 export type BlopAgentTestHandler = (context: BlopAgentTestContext) => void | Promise<void>;
 
 export type BlopRunOptions = {
+  /** Optional launch provenance; never causality or a verified fix. */
+  evidence?: BlopEvidence;
   specFile?: string;
   specFiles?: string[];
   baseUrl?: string;

@@ -77,6 +77,8 @@ import {
   stepInputAttributes,
   suiteRunStatus,
   targetOrigin,
+  type BlopEvidence,
+  evidenceAttributes,
 } from "./otel-attributes.js";
 import type { FailureSignal } from "@blopai/ingest/classify";
 
@@ -165,6 +167,7 @@ export type BlopOtelRunInput = {
   projectId?: string | null;
   targetEnvironment?: string | null;
   targetUrl?: string | null;
+  evidence?: BlopEvidence;
 };
 
 /** Absent when no metrics endpoint resolved; call sites guard with `?.`. */
@@ -268,6 +271,7 @@ export function startOtelRun(config: BlopOtelConfig, input: BlopOtelRunInput): B
         [ATTR_TEST_SUITE_NAME]: input.suiteName,
         ...(input.targetEnvironment ? { [ATTR_BLOP_TARGET_ENVIRONMENT]: input.targetEnvironment } : {}),
         ...(runTargetOrigin ? { [ATTR_BLOP_TARGET_ORIGIN]: runTargetOrigin } : {}),
+        ...evidenceAttributes(input.evidence),
         ...agentAttributes(input.provider, input.model),
         ...ciAttributes(input.ci),
       },
@@ -453,6 +457,7 @@ function startScenario(args: {
     {
       kind: SpanKind.INTERNAL,
       attributes: {
+        ...evidenceAttributes(input.evidence),
         [ATTR_BLOP_CORRELATION_VERSION]: BLOP_CORRELATION_VERSION,
         [ATTR_BLOP_RUN_ID]: input.runId,
         [ATTR_TEST_CASE_NAME]: scenario.name,
@@ -504,7 +509,7 @@ function startScenario(args: {
       });
       attemptSpan = tracer.startSpan(
         "scenario.retry",
-        { kind: SpanKind.INTERNAL, attributes: { [ATTR_BLOP_SCENARIO_ATTEMPTS]: attempt } },
+        { kind: SpanKind.INTERNAL, attributes: { ...evidenceAttributes(input.evidence), [ATTR_BLOP_SCENARIO_ATTEMPTS]: attempt } },
         scenarioContext,
       );
       attemptContext = trace.setSpan(scenarioContext, attemptSpan);
@@ -518,7 +523,7 @@ function startScenario(args: {
         name,
         {
           kind: SpanKind.INTERNAL,
-          attributes: { [ATTR_BLOP_STEP_TOOL]: name, ...stepInputAttributes(toolInput) },
+          attributes: { ...evidenceAttributes(input.evidence), [ATTR_BLOP_STEP_TOOL]: name, ...stepInputAttributes(toolInput) },
         },
         attemptContext,
       );
@@ -565,7 +570,7 @@ function startScenario(args: {
         {
           kind: SpanKind.INTERNAL,
           startTime: timestamp - action.durationMs,
-          attributes: { [ATTR_BLOP_STEP_TOOL]: action.name, ...stepInputAttributes(action.input) },
+          attributes: { ...evidenceAttributes(input.evidence), [ATTR_BLOP_STEP_TOOL]: action.name, ...stepInputAttributes(action.input) },
         },
         hostContext(),
       );

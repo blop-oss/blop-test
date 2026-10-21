@@ -107,6 +107,7 @@ export async function runBlopTests(options: BlopRunOptions): Promise<BlopRunResu
         projectId: process.env.BLOP_PROJECT_ID ?? null,
         targetEnvironment: otelConfig.environment ?? null,
         targetUrl: options.baseUrl ?? null,
+        evidence: options.evidence,
       });
 
       // Camoufox exists to be fingerprint-faithful, and a non-standard header

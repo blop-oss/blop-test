@@ -44,6 +44,26 @@ export const ATTR_BLOP_TEAM = "blop.team";
 export const ATTR_BLOP_TARGET_ENVIRONMENT = "blop.target.environment";
 export const ATTR_BLOP_TARGET_ORIGIN = "blop.target.origin";
 
+export const ATTR_BLOP_EVIDENCE_TRACE_ID = "blop.evidence.trace_id";
+export const ATTR_BLOP_EVIDENCE_FINDING_CODE = "blop.evidence.finding_code";
+export const ATTR_BLOP_EVIDENCE_SOURCE = "blop.evidence.source";
+
+/** Why a run was launched: provenance only, never a causal edge or a verdict. */
+export type BlopEvidence = {
+  source: "trace" | "finding";
+  traceId?: string;
+  findingCode?: string;
+};
+
+export function evidenceAttributes(evidence?: BlopEvidence): Attributes {
+  if (!evidence) return {};
+  return {
+    [ATTR_BLOP_EVIDENCE_SOURCE]: evidence.source,
+    ...(evidence.traceId ? { [ATTR_BLOP_EVIDENCE_TRACE_ID]: evidence.traceId } : {}),
+    ...(evidence.findingCode ? { [ATTR_BLOP_EVIDENCE_FINDING_CODE]: evidence.findingCode } : {}),
+  };
+}
+
 export const BLOP_CORRELATION_VERSION = "v1";
 
 const IDENTITY_SEPARATOR = "\u001f";
